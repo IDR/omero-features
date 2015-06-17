@@ -7,17 +7,16 @@ virtualenv:
   system_site_packages: true
 
 before_install:
-  - pip install omego
-  - omego download --branch OMERO-5.1-latest python
-  - ln -s OMERO.py-*/ OMERO.py
   - pip install flake8
   - sudo apt-get update -qq
   - sudo apt-get install -qq python-zeroc-ice
   - flake8 -v features test
+  - pip install omego
+  - omego download --branch OMERO-5.1-latest --labels ICE=3.4 python
+  - ln -s OMERO.py-*/ OMERO.py
 
 before_script:
   - export PYTHONPATH=$PYTHONPATH:$PWD/OMERO.py/lib/python
 
 script:
   - python setup.py test -s test/unit -v
-
