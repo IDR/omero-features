@@ -22,7 +22,7 @@
 import uuid
 
 import omero
-from omero.rtypes import rstring
+from omero.rtypes import rbool, rstring
 
 
 class UserAccount(object):
@@ -67,6 +67,7 @@ class UserAccount(object):
         e.omeName = rstring(name)
         e.firstName = rstring(name)
         e.lastName = rstring(name)
+        e.ldap = rbool(False)
         uid = adminService.createExperimenterWithPassword(
             e, rstring(name), g, [g, adminService.lookupGroup('user')])
         e = adminService.lookupExperimenter(name)
@@ -83,6 +84,7 @@ class UserAccount(object):
         gname = self.uuid()
         group = omero.model.ExperimenterGroupI()
         group.name = rstring(gname)
+        group.ldap = rbool(False)
         if perms:
             group.details.permissions = omero.model.PermissionsI(perms)
         gid = admin.createGroup(group)
