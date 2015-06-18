@@ -251,6 +251,7 @@ class MockFeatureTable(OmeroTablesFeatureStore.FeatureTable):
         self.ann_space = '/test/features/ann_space'
         self.cols = None
         self.table = None
+        self.metanames = None
         self.ftnames = None
         self.header = None
         self.chunk_size = None
@@ -375,6 +376,7 @@ class TestFeatureTable(object):
         else:
             ownerid = 321
 
+        meta = [('Image', 'ImageID')]
         col_desc = ['x']
         filedesc = {'name': 'table-name', 'path': store.ft_space,
                     'details.owner.id': ownerid}
@@ -387,7 +389,7 @@ class TestFeatureTable(object):
                 store.get_objects('OriginalFile', filedesc).AndReturn(None)
                 perms.get_userid().AndReturn(userid)
                 if owned:
-                    store.new_table(col_desc)
+                    store.new_table(meta, col_desc)
             else:
                 store.get_objects('OriginalFile', filedesc).AndReturn([mf])
                 store.open_table(mf)
@@ -400,9 +402,9 @@ class TestFeatureTable(object):
             if opened or not owned:
                 with pytest.raises(
                         OmeroTablesFeatureStore.TableUsageException):
-                    store.get_table(ownerid, col_desc)
+                    store.get_table(ownerid, meta, col_desc)
             else:
-                store.get_table(ownerid, col_desc)
+                store.get_table(ownerid, meta, col_desc)
         else:
             store.get_table(ownerid)
         self.mox.VerifyAll()
@@ -420,6 +422,7 @@ class TestFeatureTable(object):
             omero.grid.RoiColumn('RoiID', ''),
             omero.grid.DoubleArrayColumn('x', '', 1),
         ]
+        meta = [('Image', 'ImageID'), ('Roi', 'RoiID')]
         desc = ['x']
 
         table.initialize(mox.Func(lambda xs: self.columns_equal(xs, tcols)))
@@ -427,7 +430,7 @@ class TestFeatureTable(object):
 
         self.mox.ReplayAll()
 
-        store.new_table(desc)
+        store.new_table(meta, desc)
         assert store.table == table
         assert store.cols == tcols
         self.mox.VerifyAll()
@@ -435,7 +438,9 @@ class TestFeatureTable(object):
     def test_new_table_invalid_ftname(self):
         store = MockFeatureTable(None)
         with pytest.raises(OmeroTablesFeatureStore.TableUsageException):
-            store.new_table(['x1', '<>'])
+            store.new_table([('Image', 'ImageID')], ['x1', '<>'])
+        with pytest.raises(OmeroTablesFeatureStore.TableUsageException):
+            store.new_table([('Image', '<>')], ['x1', 'x2'])
 
     def test_open_table(self):
         mf = MockOriginalFile(1)
@@ -452,6 +457,17 @@ class TestFeatureTable(object):
         assert store.cols == cols
         self.mox.VerifyAll()
 
+    def test_metadata_names(self):
+        table = self.mox.CreateMock(MockTable)
+        store = MockFeatureTable(None)
+        store.table = table
+        store.cols = [
+            MockColumn(name='a'), MockColumn(name='b'), MockColumn()]
+
+        self.mox.ReplayAll()
+        assert store.metadata_names() == ['a', 'b']
+        self.mox.VerifyAll()
+
     def test_feature_names(self):
         table = self.mox.CreateMock(MockTable)
         store = MockFeatureTable(None)
@@ -463,53 +479,8 @@ class TestFeatureTable(object):
         assert store.feature_names() == ['a', 'b']
         self.mox.VerifyAll()
 
-    def test_store_by_image(self):
-        store = MockFeatureTable(None)
-        self.mox.StubOutWithMock(store, 'store_by_object')
-        values = [34]
-        store.store_by_object('Image', 12, values)
-
-        self.mox.ReplayAll()
-        store.store_by_image(12, values)
-        self.mox.VerifyAll()
-
-    @pytest.mark.parametrize('image', ['provided', 'unknown', 'lookup'])
-    def test_store_by_roi(self, image):
-        session = MockSession(None, None, None)
-        store = MockFeatureTable(session)
-        self.mox.StubOutWithMock(session.qs, 'projection')
-        self.mox.StubOutWithMock(store, 'store_by_object')
-        values = [34]
-
-        if image == 'lookup':
-            params = omero.sys.ParametersI()
-            params.addId(12)
-            session.getQueryService().projection(
-                'SELECT r.image.id FROM Roi r WHERE r.id=:id', mox.Func(
-                    lambda o: self.parameters_equal(params, o))).AndReturn(
-                [[wrap(1234)]])
-            imageid = 1234
-        elif image == 'provided':
-            imageid = 123
-        else:
-            imageid = None
-
-        if imageid is None:
-            store.store_by_object('Roi', 12, values)
-        else:
-            store.store_by_object('Roi', 12, values, 'Image', imageid)
-
-        self.mox.ReplayAll()
-        if image == 'lookup':
-            store.store_by_roi(12, values)
-        elif image == 'provided':
-            store.store_by_roi(12, values, 123)
-        else:
-            store.store_by_roi(12, values, -1)
-        self.mox.VerifyAll()
-
     @pytest.mark.parametrize('exists', [True, False])
-    def test_store_by_object(self, exists):
+    def test_store(self, exists):
         owned = True
         perms = self.mox.CreateMock(MockPermissionsHandler)
         table = self.mox.CreateMock(MockTable)
@@ -528,6 +499,7 @@ class TestFeatureTable(object):
         self.mox.StubOutWithMock(store, 'create_file_annotation')
 
         mf = MockOriginalFile(3)
+        meta = [12, -1]
         values = [10, 20]
         expectedcols = [MockColumn('a', [12]), MockColumn('b', [-1]),
                         MockColumn('c', [[10, 20]], 2)]
@@ -540,7 +512,7 @@ class TestFeatureTable(object):
         else:
             offsets = None
         table.getNumberOfRows().AndReturn(100)
-        table.getWhereList('(ImageID==12) & (RoiID==-1)',
+        table.getWhereList('(a==12) & (b==-1)',
                            {}, 0, 100, 0).AndReturn(offsets)
 
         if exists:
@@ -549,14 +521,12 @@ class TestFeatureTable(object):
                 o.columns == expectedcols))
         else:
             table.addData(expectedcols)
-        table.getOriginalFile().AndReturn(mf)
-        store.create_file_annotation('Image', 12, store.ann_space, mf)
 
         self.mox.ReplayAll()
-        store.store_by_object('Image', 12, values)
+        store.store(meta, values)
         self.mox.VerifyAll()
 
-    def test_store_by_object_unowned(self):
+    def test_store_unowned(self):
         owned = False
         perms = self.mox.CreateMock(MockPermissionsHandler)
         table = self.mox.CreateMock(MockTable)
@@ -574,65 +544,41 @@ class TestFeatureTable(object):
         self.mox.ReplayAll()
         with pytest.raises(
                 OmeroTablesFeatureStore.FeaturePermissionException):
-            store.store_by_object('Image', 12, [])
+            store.store([], [])
         self.mox.VerifyAll()
 
-    @pytest.mark.parametrize('last', [True, False])
-    def test_fetch_by_image(self, last):
+    def test_fetch_by_metadata(self):
         store = MockFeatureTable(None)
-        self.mox.StubOutWithMock(store, 'fetch_by_object')
+        self.mox.StubOutWithMock(store, 'filter_raw')
         self.mox.StubOutWithMock(store, 'feature_row')
-        values1 = (1, 0, [5])
-        values21 = (2, 0, [6])
-        values22 = (2, 0, [7])
+
+        meta = {'a': 1}
+        rs = (1, 2, [0])
         r1 = object()
-        r2 = object()
 
-        store.fetch_by_object('Image', 1).AndReturn([values1])
-        store.feature_row(values1).AndReturn(r1)
-
-        store.fetch_by_object('Image', 2).AndReturn([values21, values22])
-        if last:
-            store.feature_row(values22).AndReturn(r2)
+        store.fetch_by_metadata_raw(meta).AndReturn([rs])
+        store.feature_row(rs).AndReturn(r1)
 
         self.mox.ReplayAll()
-
-        assert store.fetch_by_image(1) == r1
-        if last:
-            assert store.fetch_by_image(2, last) == r2
-        else:
-            with pytest.raises(OmeroTablesFeatureStore.TableUsageException):
-                store.fetch_by_image(2, last)
-
+        assert store.fetch_by_metadata(meta) == [r1]
         self.mox.VerifyAll()
 
-    @pytest.mark.parametrize('last', [True, False])
-    def test_fetch_by_roi(self, last):
+    @pytest.mark.parametrize('meta', [[1, 2], {'a': 1, 'b': 2}])
+    def test_fetch_by_metadata_raw(self, meta):
+        table = self.mox.CreateMock(MockTable)
         store = MockFeatureTable(None)
-        self.mox.StubOutWithMock(store, 'fetch_by_object')
-        self.mox.StubOutWithMock(store, 'feature_row')
-        values1 = (0, 1, [5])
-        values21 = (0, 2, [6])
-        values22 = (0, 2, [7])
-        r1 = object()
-        r2 = object()
+        store.table = table
+        store.cols = [
+            MockColumn(name='a'), MockColumn(name='b'),
+            MockColumn(name='c', size=1)]
 
-        store.fetch_by_object('Roi', 1).AndReturn([values1])
-        store.feature_row(values1).AndReturn(r1)
+        self.mox.StubOutWithMock(store, 'filter_raw')
+        rs = (1, 2, [0])
 
-        store.fetch_by_object('Roi', 2).AndReturn([values21, values22])
-        if last:
-            store.feature_row(values22).AndReturn(r2)
+        store.filter_raw('(a==1) & (b==2)').AndReturn([rs])
 
         self.mox.ReplayAll()
-
-        assert store.fetch_by_roi(1) == r1
-        if last:
-            assert store.fetch_by_roi(2, last) == r2
-        else:
-            with pytest.raises(OmeroTablesFeatureStore.TableUsageException):
-                store.fetch_by_roi(2, last)
-
+        assert store.fetch_by_metadata_raw(meta) == [rs]
         self.mox.VerifyAll()
 
     def test_filter(self):
@@ -647,35 +593,6 @@ class TestFeatureTable(object):
 
         self.mox.ReplayAll()
         assert store.filter('RoiID==1') == [r1]
-        self.mox.VerifyAll()
-
-    def test_fetch_all(self):
-        store = MockFeatureTable(None)
-        self.mox.StubOutWithMock(store, 'fetch_by_object')
-        self.mox.StubOutWithMock(store, 'feature_row')
-        valuess = [(1, 0, [5]), (2, 0, [6])]
-        r1 = object()
-        r2 = object()
-
-        store.fetch_by_object('Image', 1).AndReturn(valuess)
-        store.feature_row(valuess[0]).AndReturn(r1)
-        store.feature_row(valuess[1]).AndReturn(r2)
-
-        self.mox.ReplayAll()
-        assert store.fetch_all(1) == [r1, r2]
-        self.mox.VerifyAll()
-
-    @pytest.mark.parametrize('objtype', ['Image', 'Roi'])
-    def test_fetch_by_object(self, objtype):
-        store = MockFeatureTable(None)
-
-        self.mox.StubOutWithMock(store, 'filter_raw')
-        rs = [1, 0, [1]]
-
-        store.filter_raw('(%sID==99)' % objtype).AndReturn(rs)
-
-        self.mox.ReplayAll()
-        assert store.fetch_by_object(objtype, 99) == rs
         self.mox.VerifyAll()
 
     @pytest.mark.parametrize('ncols', [1, 2])
@@ -727,7 +644,9 @@ class TestFeatureTable(object):
         store = MockFeatureTable(None)
         store.cols = [MockColumn('ma'), MockColumn('mb'),
                       MockColumn()]
+        self.mox.StubOutWithMock(store, 'metadata_names')
         self.mox.StubOutWithMock(store, 'feature_names')
+        store.metadata_names().AndReturn(['ma', 'mb'])
         store.feature_names().AndReturn(['a', 'b'])
         row = [10, 20, [1, 2]]
 
