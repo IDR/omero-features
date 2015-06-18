@@ -864,20 +864,21 @@ class TestFeatureTableManager(object):
         fs = MockFeatureTable(None)
         self.mox.StubOutWithMock(OmeroTablesFeatureStore, 'FeatureTable')
         fsname = 'fsname'
+        meta = [('Float', 'f')]
         colnames = ['x1', 'x2']
 
         OmeroTablesFeatureStore.FeatureTable(
             session, fsname, 'x/features', 'x/source', ownerid).AndReturn(None)
 
         OmeroTablesFeatureStore.FeatureTable(
-            session, fsname, 'x/features', 'x/source', ownerid, colnames
+            session, fsname, 'x/features', 'x/source', ownerid, meta, colnames
             ).AndReturn(fs)
 
         self.mox.ReplayAll()
 
         fts = OmeroTablesFeatureStore.FeatureTableManager(
             session, namespace='x')
-        assert fts.create(fsname, colnames) == fs
+        assert fts.create(fsname, meta, colnames) == fs
 
         assert len(fts.fss) == 1
         assert fts.fss.get((fsname, ownerid)) == fs

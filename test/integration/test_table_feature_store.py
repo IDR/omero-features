@@ -43,6 +43,7 @@ class FeatureTableProxy(OmeroTablesFeatureStore.FeatureTable):
         self.ann_space = ann_space
         self.cols = None
         self.table = None
+        self.metanames = None
         self.ftnames = None
         self.header = None
         self.chunk_size = None
@@ -61,18 +62,19 @@ class TableStoreHelper(object):
 
     @staticmethod
     def get_columns(w):
+        meta = [('Image', 'ImageID'), ('Roi', 'RoiID')]
         ftnames = ['x%d' % n for n in xrange(1, w + 1)]
         cols = [
             omero.grid.ImageColumn('ImageID'),
             omero.grid.RoiColumn('RoiID'),
             omero.grid.DoubleArrayColumn(','.join(ftnames), '', w),
         ]
-        return cols, ftnames
+        return cols, meta, ftnames
 
     @staticmethod
     def create_table(sess, path, name, width):
         table = sess.sharedResources().newTable(0, 'name')
-        cols, ftnames = TableStoreHelper.get_columns(width)
+        cols, meta, ftnames = TableStoreHelper.get_columns(width)
         table.initialize(cols)
         ofile = table.getOriginalFile()
         ofile.setPath(wrap(path))
@@ -80,7 +82,7 @@ class TableStoreHelper(object):
         ofile = sess.getUpdateService().saveAndReturnObject(ofile)
         tid = unwrap(ofile.getId())
         table.close()
-        return tid, cols, ftnames
+        return tid, cols, meta, ftnames
 
     @staticmethod
     def create_image(sess, **kwargs):
@@ -141,7 +143,7 @@ class TestFeatureTable(TableStoreTestHelper):
         uid = unwrap(self.user.getId())
 
         if exists:
-            tid, tcols, ftnames = TableStoreHelper.create_table(
+            tid, tcols, meta, ftnames = TableStoreHelper.create_table(
                 self.sess, self.ft_space, self.name, 1)
             table = store.get_table(uid)
 
@@ -154,14 +156,15 @@ class TestFeatureTable(TableStoreTestHelper):
         store.close()
 
     def test_new_table(self):
-        tcols, ftnames = TableStoreHelper.get_columns(2)
+        tcols, meta, ftnames = TableStoreHelper.get_columns(2)
 
         store = FeatureTableProxy(
             self.sess, self.name, self.ft_space, self.ann_space)
-        store.new_table(ftnames)
+        store.new_table(meta, ftnames)
         assert store.table
         TableStoreHelper.assert_coltypes_equal(store.cols, tcols)
 
+        assert store.metadata_names() == [m[1] for m in meta]
         assert store.feature_names() == ftnames
 
         # Need to reload
@@ -174,7 +177,7 @@ class TestFeatureTable(TableStoreTestHelper):
         store.close()
 
     def test_open_table(self):
-        tid, tcols, ftnames = TableStoreHelper.create_table(
+        tid, tcols, meta, ftnames = TableStoreHelper.create_table(
             self.sess, self.ft_space, self.name, 1)
 
         store = FeatureTableProxy(
@@ -182,16 +185,17 @@ class TestFeatureTable(TableStoreTestHelper):
         store.open_table(omero.model.OriginalFileI(tid))
         assert store.table
         TableStoreHelper.assert_coltypes_equal(store.cols, tcols)
+        assert store.metadata_names() == [m[1] for m in meta]
         assert store.feature_names() == ftnames
 
         store.close()
 
     @pytest.mark.parametrize('exists', [True, False])
     @pytest.mark.parametrize('replace', [True, False])
-    def test_store_by_object(self, exists, replace):
+    def test_store(self, exists, replace):
         width = 2
 
-        tid, tcols, ftnames = TableStoreHelper.create_table(
+        tid, tcols, meta, ftnames = TableStoreHelper.create_table(
             self.sess, self.ft_space, self.name, width)
         imageid = unwrap(TableStoreHelper.create_image(self.sess).getId())
         roiid = unwrap(TableStoreHelper.create_roi(self.sess).getId())
@@ -201,10 +205,10 @@ class TestFeatureTable(TableStoreTestHelper):
         store.open_table(omero.model.OriginalFileI(tid))
 
         if exists:
-            store.store_by_object('Image', imageid, [10, 20])
+            store.store([imageid, -1], [10, 20])
             assert store.table.getNumberOfRows() == 1
 
-        store.store_by_object('Image', imageid, [10, 20], replace=replace)
+        store.store([imageid, -1], [10, 20], replace=replace)
 
         if exists and not replace:
             assert store.table.getNumberOfRows() == 2
@@ -221,7 +225,7 @@ class TestFeatureTable(TableStoreTestHelper):
             assert d[1].values == [-1]
             assert d[2].values == [[10, 20]]
 
-        store.store_by_object('Roi', roiid, [90, 80], replace=replace)
+        store.store([-1, roiid], [90, 80], replace=replace)
 
         if exists and not replace:
             assert store.table.getNumberOfRows() == 3
@@ -238,27 +242,28 @@ class TestFeatureTable(TableStoreTestHelper):
             assert d[1].values == [-1, roiid]
             assert d[2].values == [[10, 20], [90, 80]]
 
-        qs = self.sess.getQueryService()
-        q = 'SELECT l.child FROM %sAnnotationLink l WHERE l.parent.id=%d'
+        # qs = self.sess.getQueryService()
+        # q = 'SELECT l.child FROM %sAnnotationLink l WHERE l.parent.id=%d'
 
-        anns = qs.findAllByQuery(q % ('Image', imageid), None)
-        assert len(anns) == 1
-        assert unwrap(anns[0].getFile().getId()) == tid
+        # anns = qs.findAllByQuery(q % ('Image', imageid), None)
+        # assert len(anns) == 1
+        # assert unwrap(anns[0].getFile().getId()) == tid
 
-        anns = qs.findAllByQuery(q % ('Roi', roiid), None)
-        assert len(anns) == 1
-        assert unwrap(anns[0].getFile().getId()) == tid
+        # anns = qs.findAllByQuery(q % ('Roi', roiid), None)
+        # assert len(anns) == 1
+        # assert unwrap(anns[0].getFile().getId()) == tid
 
         store.close()
 
-    def test_store_by_object_unowned(self):
+    def test_store_unowned(self):
         width = 2
         user2 = self.create_user_same_group()
         tablesess = self.create_client_session(user2)
 
-        tid, tcols, ftnames = TableStoreHelper.create_table(
+        tid, tcols, meta, ftnames = TableStoreHelper.create_table(
             tablesess, self.ft_space, self.name, width)
         imageid = unwrap(TableStoreHelper.create_image(self.sess).getId())
+        assert imageid
 
         store = FeatureTableProxy(
             self.sess, self.name, self.ft_space, self.ann_space)
@@ -266,7 +271,7 @@ class TestFeatureTable(TableStoreTestHelper):
 
         with pytest.raises(
                 OmeroTablesFeatureStore.FeaturePermissionException):
-            store.store_by_object('Image', imageid, [10, 20])
+            store.store([0, 0], [10, 20])
 
         store.close()
 
@@ -277,7 +282,7 @@ class TestFeatureTable(TableStoreTestHelper):
             user2 = self.create_user_same_group()
             tablesess = self.create_client_session(user2)
 
-        tid, tcols, ftnames = TableStoreHelper.create_table(
+        tid, tcols, meta, ftnames = TableStoreHelper.create_table(
             tablesess, self.ft_space, self.name, width)
 
         tcols[0].values = [12, -1, 12, 13]
@@ -292,13 +297,17 @@ class TestFeatureTable(TableStoreTestHelper):
         table.close()
         return tid
 
-    def test_fetch_by_image(self):
+    @pytest.mark.parametrize('meta', [{'ImageID': 13}, [13, None]])
+    def test_fetch_by_metadata1(self, meta):
         tid = self.create_table_for_fetch(owned=True, width=1)
         store = FeatureTableProxy(
             self.sess, self.name, self.ft_space, self.ann_space)
         store.open_table(omero.model.OriginalFileI(tid))
 
-        fr = store.fetch_by_image(13)
+        fr = store.fetch_by_metadata(meta)
+
+        assert len(fr) == 1
+        fr = fr[0]
         assert fr.infonames == ['ImageID', 'RoiID']
         assert fr.infovalues == (13, -1)
         assert fr.names == ['x1']
@@ -306,17 +315,41 @@ class TestFeatureTable(TableStoreTestHelper):
 
         store.close()
 
-    def test_fetch_by_roi(self):
+    @pytest.mark.parametrize('meta', [{'ImageID': 12, 'RoiID': 56}, [12, 56]])
+    def test_fetch_by_metadata2(self, meta):
         tid = self.create_table_for_fetch(owned=True, width=1)
         store = FeatureTableProxy(
             self.sess, self.name, self.ft_space, self.ann_space)
         store.open_table(omero.model.OriginalFileI(tid))
 
-        fr = store.fetch_by_roi(56)
+        fr = store.fetch_by_metadata(meta)
+
+        assert len(fr) == 1
+        fr = fr[0]
         assert fr.infonames == ['ImageID', 'RoiID']
         assert fr.infovalues == (12, 56)
         assert fr.names == ['x1']
         assert fr.values == [20]
+
+        store.close()
+
+    @pytest.mark.parametrize('meta', [{'ImageID': 12}, [12, None]])
+    @pytest.mark.parametrize('width', [1, 2])
+    def test_fetch_by_metadata_raw(self, meta, width):
+        tid = self.create_table_for_fetch(owned=True, width=width)
+        store = FeatureTableProxy(
+            self.sess, self.name, self.ft_space, self.ann_space)
+        store.open_table(omero.model.OriginalFileI(tid))
+
+        rvalues = store.fetch_by_metadata_raw(meta)
+
+        assert len(rvalues) == 2
+        if width == 1:
+            assert rvalues[0] == (12, -1, [10])
+            assert rvalues[1] == (12, 56, [20])
+        else:
+            assert rvalues[0] == (12, -1, [20, 30])
+            assert rvalues[1] == (12, 56, [40, 50])
 
         store.close()
 
@@ -332,35 +365,6 @@ class TestFeatureTable(TableStoreTestHelper):
         assert fr[0].infovalues == (-1, 34)
         assert fr[0].names == ['x1']
         assert fr[0].values == [90]
-
-        store.close()
-
-    @pytest.mark.parametrize('owned', [True, False])
-    @pytest.mark.parametrize('width', [1, 2])
-    def test_fetch_by_object(self, owned, width):
-        tid = self.create_table_for_fetch(owned, width)
-
-        store = FeatureTableProxy(
-            self.sess, self.name, self.ft_space, self.ann_space)
-        store.open_table(omero.model.OriginalFileI(tid))
-
-        assert store.table.getNumberOfRows() == 4
-
-        rvalues = store.fetch_by_object('Image', 12)
-        assert len(rvalues) == 2
-        if width == 1:
-            assert rvalues[0] == (12, -1, [10])
-            assert rvalues[1] == (12, 56, [20])
-        else:
-            assert rvalues[0] == (12, -1, [20, 30])
-            assert rvalues[1] == (12, 56, [40, 50])
-
-        rvalues = store.fetch_by_object('Roi', 34)
-        assert len(rvalues) == 1
-        if width == 1:
-            assert rvalues[0] == (-1, 34, [90])
-        else:
-            assert rvalues[0] == (-1, 34, [80, 70])
 
         store.close()
 
@@ -393,7 +397,7 @@ class TestFeatureTable(TableStoreTestHelper):
         store.close()
 
     def test_create_file_annotation(self):
-        tid, tcols, ftnames = TableStoreHelper.create_table(
+        tid, tcols, meta, ftnames = TableStoreHelper.create_table(
             self.sess, self.ft_space, self.name, 1)
         imageid = unwrap(TableStoreHelper.create_image(self.sess).getId())
         ofile = self.sess.getQueryService().get(
@@ -435,7 +439,8 @@ class TestFeatureTable(TableStoreTestHelper):
         iid2 = unwrap(TableStoreHelper.create_image(self.sess).getId())
         store = FeatureTableProxy(
             tablesess, self.name, self.ft_space, self.ann_space)
-        ofile = store.get_table(ownerid, ['x']).getOriginalFile()
+        ofile = store.get_table(
+            ownerid, [('Long', 'id')], ['x']).getOriginalFile()
 
         link1 = store.create_file_annotation(
             'Image', iid1, self.ann_space, ofile)
@@ -488,10 +493,11 @@ class TestFeatureTableManager(TableStoreTestHelper):
 
     def test_create(self, fsname='fsname-create'):
         uid = unwrap(self.user.getId())
+        meta = [('Image', 'ImageID'), ('Roi', 'RoiID')]
         colnames = ['x1', 'x2']
         fts = OmeroTablesFeatureStore.FeatureTableManager(
             self.sess, ft_space=self.ft_space, ann_space=self.ann_space)
-        fs = fts.create(fsname, colnames)
+        fs = fts.create(fsname, meta, colnames)
 
         expected_cols = [
             omero.grid.ImageColumn('ImageID', ''),
@@ -503,7 +509,7 @@ class TestFeatureTableManager(TableStoreTestHelper):
         assert fs.feature_names() == colnames
 
         with pytest.raises(OmeroTablesFeatureStore.TooManyTablesException):
-            fs = fts.create(fsname, colnames)
+            fs = fts.create(fsname, meta, colnames)
 
         fts.close()
 
