@@ -42,6 +42,11 @@ DEFAULT_ANNOTATION_SUBSPACE = 'source'
 
 FEATURE_NAME_RE = r'^[A-Za-z0-9][A-Za-z0-9_ \-\(\)\[\]\{\}\.]*$'
 
+# Column type strings
+COLUMN_TYPES = [m.group(1) for m in (
+    re.match('([^_]\w+)Column$', s) for s in dir(omero.grid)) if m]
+META_COLUMN_TYPES = [t for t in COLUMN_TYPES if not t.endswith('Array')]
+
 # Indicates the object ID is unknown
 NOID = -1
 
@@ -246,6 +251,7 @@ class FeatureTable(AbstractFeatureStore):
         self.ann_space = ann_space
         self.cols = None
         self.table = None
+        self.metanames = None
         self.ftnames = None
         self.chunk_size = None
         self.get_table(ownerid, coldesc=coldesc)
@@ -269,14 +275,14 @@ class FeatureTable(AbstractFeatureStore):
             self.cols = None
             self.ftnames = None
 
-    def get_table(self, ownerid, coldesc=None):
+    def get_table(self, ownerid, metadesc=None, coldesc=None):
         """
         Get the table using the parameters specified during initialisation
 
         :param ownerid: The user-ID of the owner of the table file
-        :param coldesc: If provided a new table will be created and
-               initialised with this list of feature names, default None
-               (table must already exist)
+        :param metadesc, coldesc: If provided a new table will be created
+               and initialised with this list of metadata and feature names,
+               default None (table must already exist)
         """
         tablepath = self.ft_space + '/' + self.name
         if self.table:
@@ -291,14 +297,14 @@ class FeatureTable(AbstractFeatureStore):
             q['details.owner.id'] = ownerid
         tablefile = self.get_objects('OriginalFile', q)
 
-        if coldesc:
+        if metadesc or coldesc:
             if tablefile:
                 raise TooManyTablesException(
                     'Table file already exists: %s' % tablepath)
             if self.perms.get_userid() != ownerid:
                 raise TableUsageException(
                     'Unable to create table for a different user')
-            self.new_table(coldesc)
+            self.new_table(metadesc, coldesc)
         else:
             if len(tablefile) < 1:
                 raise NoTableMatchException(
@@ -309,12 +315,41 @@ class FeatureTable(AbstractFeatureStore):
             self.open_table(tablefile[0])
         return self.table
 
-    def new_table(self, coldesc):
+    def _column_from_desc(self, desc):
+        """
+        Create an omero.grid.*Column from a metadata description
+        """
+        coltype = getattr(omero.grid, desc[0] + 'Column')
+        if len(desc) > 2:
+            col = coltype(desc[1], '', desc[2])
+        else:
+            col = coltype(desc[1], '')
+        return col
+
+    def new_table(self, metadesc, coldesc):
         """
         Create a new table
 
-        :param coldesc: A list of column names
+        :param metadesc: A list of (column type, column name[, width])
+            tuples. Columns must be scalars or strings, see META_COLUMN_TYPES
+            for valid type strings. String columns require an additional width
+            parameter.
+        :param coldesc: A list of feature column names
         """
+        if not metadesc or not coldesc:
+            raise TableUsageException('Metadata and feature names required')
+
+        for m in metadesc:
+            if len(m) not in (2, 3):
+                raise TableUsageException('Invalid metadata: %s' % str(m))
+            if not m[0] in META_COLUMN_TYPES:
+                raise TableUsageException('Invalid metadata type: %s' % str(m))
+            if m[0] == 'String':
+                if len(m) != 3 or not m[2] or m[2] < 1:
+                    raise TableUsageException(
+                        'Invalid metadata width: %s' % str(m))
+            if not re.match(FEATURE_NAME_RE, m[1]):
+                raise TableUsageException('Invalid metadata name: %s' % str(m))
         for n in coldesc:
             if not re.match(FEATURE_NAME_RE, n):
                 raise TableUsageException('Invalid feature name: %s' % n)
@@ -343,10 +378,7 @@ class FeatureTable(AbstractFeatureStore):
             if not self.table:
                 raise OmeroTableException('Failed to reopen table ID:%d' % tid)
 
-        coldef = [
-            omero.grid.ImageColumn('ImageID', ''),
-            omero.grid.RoiColumn('RoiID', '')
-        ]
+        coldef = [self._column_from_desc(m) for m in metadesc]
 
         # We don't currently have a good way of storing individual feature
         # names for a DoubleArrayColumn:
@@ -391,79 +423,43 @@ class FeatureTable(AbstractFeatureStore):
             raise OmeroTableException(
                 'Failed to get columns for table ID:%d' % tid)
 
+    def metadata_names(self):
+        """
+        Get the list of metadata names
+        """
+        if not self.metanames:
+            self.metanames = [col.name for col in self.cols[:-1]]
+        return self.metanames
+
     def feature_names(self):
         """
         Get the list of feature names
         """
         if not self.ftnames:
-            self.ftnames = self.cols[2].name.split(',')
-            assert len(self.ftnames) == self.cols[2].size
+            self.ftnames = self.cols[-1].name.split(',')
+            assert len(self.ftnames) == self.cols[-1].size
         return self.ftnames
 
-    def store_by_image(self, image_id, values):
-        self.store_by_object('Image', long(image_id), values)
-
-    def store_by_roi(self, roi_id, values, image_id=None):
-        if image_id is None:
-            params = omero.sys.ParametersI()
-            params.addId(roi_id)
-            image_id = self.session.getQueryService().projection(
-                'SELECT r.image.id FROM Roi r WHERE r.id=:id', params)
-            try:
-                image_id = unwrap(image_id[0][0])
-            except IndexError:
-                raise TableUsageException('No image found for Roi: %d', roi_id)
-        if image_id < 0:
-            self.store_by_object('Roi', long(roi_id), values)
-        else:
-            self.store_by_object(
-                'Roi', long(roi_id), values, 'Image', image_id)
-
     @_owns_table
-    def store_by_object(self, object_type, object_id, values,
-                        parent_type=None, parent_id=None, replace=True):
-        """
-        Store a feature row
+    def store(self, meta, values, replace=True):
+        meta_len = len(self.metadata_names())
 
-        :param object_type: The object directly associated with the features
-        :param object_id: The object ID
-        :param values: Feature values, an array of doubles
-        :param parent_type: The parent type of the object, optional
-        :param parent_id: The parent ID of the object
-        :param replace: If True (default) replace existing rows with the same
-               IDs
-        """
-        image_id = NOID
-        roi_id = NOID
-        if object_type == 'Image':
-            if parent_type:
-                raise TableUsageException('Parent not supported for Image')
-            image_id = object_id
-        elif object_type == 'Roi':
-            roi_id = object_id
-            if parent_type:
-                if parent_type == 'Image':
-                    image_id = parent_id
-                else:
-                    raise TableUsageException(
-                        'Invalid parent type: %s', parent_type)
-        else:
-            raise TableUsageException(
-                'Invalid object type: %s' % object_type)
+        if len(meta) != meta_len:
+            raise TableUsageException('Expected %d metadata values' % meta_len)
 
-        self.cols[0].values = [image_id]
-        self.cols[1].values = [roi_id]
+        for n in xrange(meta_len):
+            self.cols[n].values = [meta[n]]
 
         offset = -1
         if replace:
-            conditions = '(ImageID==%d) & (RoiID==%d)' % (
-                self.cols[0].values[0], self.cols[1].values[0])
+            kvs = zip(self.metadata_names(), meta)
+            conditions = ' & '.join('(%s==%s)' % kv for kv in kvs)
             offsets = self.table.getWhereList(
                 conditions, {}, 0, self.table.getNumberOfRows(), 0)
             if offsets:
                 offset = max(offsets)
 
-        self.cols[2].values = [values]
+        self.cols[-1].values = [values]
 
         if offset > -1:
             data = omero.grid.Data(rowNumbers=[offset], columns=self.cols)
@@ -471,56 +467,29 @@ class FeatureTable(AbstractFeatureStore):
         else:
             self.table.addData(self.cols)
 
-        if image_id > NOID:
-            self.create_file_annotation('Image', image_id, self.ann_space,
-                                        self.table.getOriginalFile())
-        if roi_id > NOID:
-            self.create_file_annotation('Roi', roi_id, self.ann_space,
-                                        self.table.getOriginalFile())
-
-    def fetch_by_image(self, image_id, last=False):
-        values = self.fetch_by_object('Image', image_id)
-        if len(values) > 1 and not last:
-            raise TableUsageException(
-                'Multiple feature rows found for Image %d' % image_id)
-        if not values:
-            raise TableUsageException(
-                'No feature rows found for Image %d' % image_id)
-        return self.feature_row(values[-1])
-
-    def fetch_by_roi(self, roi_id, last=False):
-        values = self.fetch_by_object('Roi', roi_id)
-        if len(values) > 1 and not last:
-            raise TableUsageException(
-                'Multiple feature rows found for Roi %d' % roi_id)
-        if not values:
-            raise TableUsageException(
-                'No feature rows found for Roi %d' % roi_id)
-        return self.feature_row(values[-1])
-
-    def fetch_all(self, image_id):
-        values = self.fetch_by_object('Image', image_id)
+    def fetch_by_metadata(self, meta):
+        values = self.fetch_by_metadata_raw(meta)
         return [self.feature_row(v) for v in values]
+
+    def fetch_by_metadata_raw(self, meta):
+        try:
+            kvs = meta.iteritems()
+        except AttributeError:
+            meta_len = len(self.metadata_names())
+            if len(meta) != meta_len:
+                raise TableUsageException(
+                    'Expected %d metadata values' % meta_len)
+            kvs = zip(self.metadata_names(), meta)
+
+        conditions = ['(%s==%s)' % kv for kv in kvs if kv[1] is not None]
+        conditions = ' & '.join(conditions)
+        values = self.filter_raw(conditions)
+        return values
 
     def filter(self, conditions):
         log.warn('The filter/query syntax is still under development')
         values = self.filter_raw(conditions)
         return [self.feature_row(v) for v in values]
-
-    def fetch_by_object(self, object_type, object_id):
-        """
-        Fetch all feature rows for an object
-
-        :param object_type: The object type
-        :param object_id: The object ID
-        :return: A list of tuples (Image-ID, Roi-ID, feature-values)
-        """
-        if object_type in ('Image', 'Roi'):
-            cond = '(%sID==%d)' % (object_type, object_id)
-        else:
-            raise TableUsageException(
-                'Unsupported object type: %s' % object_type)
-        return self.filter_raw(cond)
 
     def filter_raw(self, conditions):
         """
@@ -547,10 +516,12 @@ class FeatureTable(AbstractFeatureStore):
 
         :param values: The feature values
         """
+        fnames = self.feature_names()
+        mnames = self.metadata_names()
+        assert len(values) == len(mnames) + 1
         return FeatureRow(
-            names=self.feature_names(),
-            infonames=[h.name for h in self.cols[:2]],
-            values=values[2], infovalues=values[:2])
+            names=fnames, infonames=mnames,
+            values=values[-1], infovalues=values[:-1])
 
     def get_chunk_size(self):
         """
