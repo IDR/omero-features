@@ -243,7 +243,7 @@ class FeatureTable(AbstractFeatureStore):
     """
 
     def __init__(self, session, name, ft_space, ann_space, ownerid,
-                 coldesc=None):
+                 metadesc=None, coldesc=None):
         self.session = session
         self.perms = PermissionsHandler(session)
         self.name = name
@@ -254,7 +254,7 @@ class FeatureTable(AbstractFeatureStore):
         self.metanames = None
         self.ftnames = None
         self.chunk_size = None
-        self.get_table(ownerid, coldesc=coldesc)
+        self.get_table(ownerid, metadesc=metadesc, coldesc=coldesc)
 
     def _owns_table(func):
         def assert_owns_table(*args, **kwargs):
@@ -727,7 +727,7 @@ class FeatureTableManager(AbstractFeatureStoreManager):
         self.cachesize = kwargs.get('cachesize', 10)
         self.fss = LRUClosableCache(kwargs.get('cachesize', 10))
 
-    def create(self, featureset_name, names):
+    def create(self, featureset_name, metadesc, names):
         try:
             ownerid = self.session.getAdminService().getEventContext().userId
             fs = self.get(featureset_name, ownerid)
@@ -740,7 +740,7 @@ class FeatureTableManager(AbstractFeatureStoreManager):
         coldesc = names
         fs = FeatureTable(
             self.session, featureset_name, self.ft_space, self.ann_space,
-            ownerid, coldesc)
+            ownerid, metadesc, coldesc)
         self.fss.insert((featureset_name, ownerid), fs)
         return fs
 
