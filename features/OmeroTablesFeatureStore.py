@@ -243,7 +243,18 @@ class FeatureTable(AbstractFeatureStore):
     """
 
     def __init__(self, session, name, ft_space, ann_space, ownerid,
-                 metadesc=None, coldesc=None):
+                 metadesc=None, coldesc=None, noopen=False):
+        """
+        :param session: An OMERO session
+        :param name: The feature table name
+        :param ft_space: The feature table namespace
+        :param ann_space: The feature annotation namespace
+        :param ownerid: User ID of the table owner
+        :param metadesc: See :meth:`new_table`
+        :param coldesc: See :meth:`new_table`
+        :param noopen: Don't automatically open a table (manually call
+            :meth:new_table or :meth:open_table)
+        """
         self.session = session
         self.perms = PermissionsHandler(session)
         self.name = name
@@ -256,7 +267,9 @@ class FeatureTable(AbstractFeatureStore):
         self.ftnames = None
         self.chunk_size = None
         self.editable = None
-        self.get_table(ownerid, metadesc=metadesc, coldesc=coldesc)
+        if not noopen:
+            self.open_or_create_table(
+                ownerid, metadesc=metadesc, coldesc=coldesc)
 
     def _owns_table(func):
         def assert_owns_table(*args, **kwargs):
@@ -281,27 +294,47 @@ class FeatureTable(AbstractFeatureStore):
             self.ftnames = None
             self.editable = None
 
-    def get_table(self, ownerid, metadesc=None, coldesc=None):
+    def get_table(self):
+        """
+        Get the table handle
+        """
+        if not self.table:
+            raise TableUsageException('Table not open')
+        return self.table
+
+    def open_or_create_table(
+            self, ownerid, metadesc=None, coldesc=None, ofileid=None):
         """
         Get the table using the parameters specified during initialisation
 
         :param ownerid: The user-ID of the owner of the table file
         :param metadesc, coldesc: If provided a new table will be created
                and initialised with this list of metadata and feature names,
-               default None (table must already exist)
+               default None (table must already exist), see :meth:`new_table`
+        :param ofileid: If provided use the table with this OriginalFile ID,
+               the table must already be initialised, name and ft_space will
+               be ignored
         """
         tablepath = self.ft_space + '/' + self.name
         if self.table:
-            if coldesc:
-                raise TableUsageException(
-                    'New table requested but already open: %s' % tablepath)
+            raise TableUsageException(
+                'Table already open: %s' % tablepath)
             assert self.cols
             return self.table
 
-        q = {'name': self.name, 'path': self.ft_space}
+        if ofileid:
+            q = {'id': ofileid}
+        else:
+            q = {'name': self.name, 'path': self.ft_space}
         if ownerid > -1:
             q['details.owner.id'] = ownerid
         tablefile = self.get_objects('OriginalFile', q)
+
+        if ofileid:
+            if not tablefile:
+                raise NoTableMatchException(
+                    'Table OriginalFile not found: %s' % ofileid)
+            assert len(tablefile) == 1
 
         if metadesc or coldesc:
             if tablefile:
@@ -479,8 +512,8 @@ class FeatureTable(AbstractFeatureStore):
         Append data to a pending table, do not write to server (replace is
         not supported)
 
-        :param meta: As for store()
-        :param values: As for store()
+        :param meta: See :meth:`store`
+        :param values: See :meth:`store`
         """
         if not self.pendingcols:
             self.pendingcols = self.table.getHeaders()
