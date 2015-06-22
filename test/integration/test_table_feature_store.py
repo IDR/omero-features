@@ -46,6 +46,7 @@ class FeatureTableProxy(OmeroTablesFeatureStore.FeatureTable):
         self.metanames = None
         self.ftnames = None
         self.header = None
+        self.editable = None
         self.chunk_size = None
 
 

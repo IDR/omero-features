@@ -254,12 +254,16 @@ class FeatureTable(AbstractFeatureStore):
         self.metanames = None
         self.ftnames = None
         self.chunk_size = None
+        self.editable = None
         self.get_table(ownerid, metadesc=metadesc, coldesc=coldesc)
 
     def _owns_table(func):
         def assert_owns_table(*args, **kwargs):
             self = args[0]
-            if not self.perms.can_edit(self.table.getOriginalFile()):
+            if self.editable is None:
+                self.editable = self.perms.can_edit(
+                    self.table.getOriginalFile())
+            if not self.editable:
                 raise FeaturePermissionException(
                     'Feature table must be owned by the current user')
             return func(*args, **kwargs)
@@ -274,6 +278,7 @@ class FeatureTable(AbstractFeatureStore):
             self.table = None
             self.cols = None
             self.ftnames = None
+            self.editable = None
 
     def get_table(self, ownerid, metadesc=None, coldesc=None):
         """
