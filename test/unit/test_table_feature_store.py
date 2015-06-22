@@ -361,10 +361,28 @@ class TestFeatureTable(object):
         self.mox.VerifyAll()
 
     @pytest.mark.parametrize('opened', [True, False])
+    def test_get_table(self, opened):
+        table = self.mox.CreateMock(MockTable)
+        store = MockFeatureTable(None)
+        if opened:
+            store.table = table
+
+        if opened:
+            assert store.get_table() == table
+        else:
+            with pytest.raises(OmeroTablesFeatureStore.TableUsageException):
+                store.get_table()
+
+    @pytest.mark.parametrize('opened', [True, False])
     @pytest.mark.parametrize('create', [True, False])
     @pytest.mark.parametrize('owned', [True, False])
-    def test_get_table(self, opened, create, owned):
-        mf = MockOriginalFile(1)
+    @pytest.mark.parametrize('ofile', [True, False])
+    def test_open_or_create_table(self, opened, create, owned, ofile):
+        tid = 1
+        if create and not ofile:
+            mfs = None
+        else:
+            mfs = [MockOriginalFile(tid)]
         perms = self.mox.CreateMock(MockPermissionsHandler)
         self.mox.StubOutWithMock(perms, 'get_userid')
         store = MockFeatureTable(None)
@@ -381,35 +399,54 @@ class TestFeatureTable(object):
 
         meta = [('Image', 'ImageID')]
         col_desc = ['x']
-        filedesc = {'name': 'table-name', 'path': store.ft_space,
-                    'details.owner.id': ownerid}
+        if ofile:
+            filedesc = {'id': tid, 'details.owner.id': ownerid}
+        else:
+            filedesc = {'name': 'table-name', 'path': store.ft_space,
+                        'details.owner.id': ownerid}
 
         if opened:
             store.table = table
             store.cols = object()
         else:
+            store.get_objects('OriginalFile', filedesc).AndReturn(mfs)
             if create:
-                store.get_objects('OriginalFile', filedesc).AndReturn(None)
-                perms.get_userid().AndReturn(userid)
-                if owned:
-                    store.new_table(meta, col_desc)
+                if not ofile:
+                    perms.get_userid().AndReturn(userid)
+                    if owned:
+                        store.new_table(meta, col_desc)
             else:
-                store.get_objects('OriginalFile', filedesc).AndReturn([mf])
-                store.open_table(mf)
+                store.open_table(mfs[0])
 
         self.mox.ReplayAll()
 
         # open_table is mocked so it won't set store.table
         # assert store.get_table() == table
         if create:
-            if opened or not owned:
+            if opened:
                 with pytest.raises(
                         OmeroTablesFeatureStore.TableUsageException):
-                    store.get_table(ownerid, meta, col_desc)
+                    store.open_or_create_table(ownerid, meta, col_desc)
+            elif ofile:
+                with pytest.raises(
+                        OmeroTablesFeatureStore.TooManyTablesException):
+                    store.open_or_create_table(
+                        ownerid, meta, col_desc, ofileid=1)
+            elif not owned:
+                with pytest.raises(
+                        OmeroTablesFeatureStore.TableUsageException):
+                    store.open_or_create_table(ownerid, meta, col_desc)
             else:
-                store.get_table(ownerid, meta, col_desc)
+                store.open_or_create_table(ownerid, meta, col_desc)
         else:
-            store.get_table(ownerid)
+            if opened:
+                with pytest.raises(
+                        OmeroTablesFeatureStore.TableUsageException):
+                    store.open_or_create_table(ownerid)
+            elif ofile:
+                store.open_or_create_table(ownerid, ofileid=1)
+            else:
+                store.open_or_create_table(ownerid)
         self.mox.VerifyAll()
 
     def test_new_table(self):
