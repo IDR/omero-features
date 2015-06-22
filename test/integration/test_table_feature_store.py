@@ -42,6 +42,7 @@ class FeatureTableProxy(OmeroTablesFeatureStore.FeatureTable):
         self.ft_space = ft_space
         self.ann_space = ann_space
         self.cols = None
+        self.pendingcols = None
         self.table = None
         self.metanames = None
         self.ftnames = None
@@ -273,6 +274,37 @@ class TestFeatureTable(TableStoreTestHelper):
         with pytest.raises(
                 OmeroTablesFeatureStore.FeaturePermissionException):
             store.store([0, 0], [10, 20])
+
+        store.close()
+
+    def test_store_pending_flush(self):
+        width = 2
+
+        tid, tcols, meta, ftnames = TableStoreHelper.create_table(
+            self.sess, self.ft_space, self.name, width)
+        imageid = unwrap(TableStoreHelper.create_image(self.sess).getId())
+        roiid = unwrap(TableStoreHelper.create_roi(self.sess).getId())
+
+        store = FeatureTableProxy(
+            self.sess, self.name, self.ft_space, self.ann_space)
+        store.open_table(omero.model.OriginalFileI(tid))
+
+        store.store_pending([imageid, -1], [10, 20])
+        assert store.table.getNumberOfRows() == 0
+        store.store_pending([-1, roiid], [90, 80])
+        assert store.table.getNumberOfRows() == 0
+
+        store.store_flush()
+
+        assert store.table.getNumberOfRows() == 2
+        d = store.table.readCoordinates(range(0, 2)).columns
+        assert len(d) == 3
+        assert d[0].values == [imageid, -1]
+        assert d[1].values == [-1, roiid]
+        assert d[2].values == [[10, 20], [90, 80]]
+
+        store.store_flush()
+        assert store.table.getNumberOfRows() == 2
 
         store.close()
 

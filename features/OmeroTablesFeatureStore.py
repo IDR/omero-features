@@ -250,6 +250,7 @@ class FeatureTable(AbstractFeatureStore):
         self.ft_space = ft_space
         self.ann_space = ann_space
         self.cols = None
+        self.pendingcols = None
         self.table = None
         self.metanames = None
         self.ftnames = None
@@ -471,6 +472,44 @@ class FeatureTable(AbstractFeatureStore):
             self.table.update(data)
         else:
             self.table.addData(self.cols)
+
+    @_owns_table
+    def store_pending(self, meta, values):
+        """
+        Append data to a pending table, do not write to server (replace is
+        not supported)
+
+        :param meta: As for store()
+        :param values: As for store()
+        """
+        if not self.pendingcols:
+            self.pendingcols = self.table.getHeaders()
+            for col in self.pendingcols:
+                col.values = []
+
+        meta_len = len(self.metadata_names())
+
+        if len(meta) != meta_len:
+            raise TableUsageException('Expected %d metadata values' % meta_len)
+
+        for n in xrange(meta_len):
+            self.pendingcols[n].values.append(meta[n])
+
+        self.pendingcols[-1].values.append(values)
+
+    @_owns_table
+    def store_flush(self):
+        """
+        Write any pending table data
+
+        :return: The number of rows written
+        """
+        n = 0
+        if self.pendingcols:
+            self.table.addData(self.pendingcols)
+            n = len(self.pendingcols[0].values)
+        self.pendingcols = None
+        return n
 
     def fetch_by_metadata(self, meta):
         values = self.fetch_by_metadata_raw(meta)

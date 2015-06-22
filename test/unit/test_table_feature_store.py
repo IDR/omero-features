@@ -21,6 +21,7 @@
 
 import pytest
 import mox
+import copy
 import itertools
 
 import omero
@@ -250,6 +251,7 @@ class MockFeatureTable(OmeroTablesFeatureStore.FeatureTable):
         self.ft_space = '/test/features/ft_space'
         self.ann_space = '/test/features/ann_space'
         self.cols = None
+        self.pendingcols = None
         self.table = None
         self.metanames = None
         self.ftnames = None
@@ -480,8 +482,7 @@ class TestFeatureTable(object):
         assert store.feature_names() == ['a', 'b']
         self.mox.VerifyAll()
 
-    @pytest.mark.parametrize('exists', [True, False])
-    def test_store(self, exists):
+    def setup_test_store(self):
         owned = True
         perms = self.mox.CreateMock(MockPermissionsHandler)
         table = self.mox.CreateMock(MockTable)
@@ -507,6 +508,12 @@ class TestFeatureTable(object):
 
         table.getOriginalFile().AndReturn(mf)
         perms.can_edit(mf).AndReturn(owned)
+
+        return store, table, meta, values, expectedcols
+
+    @pytest.mark.parametrize('exists', [True, False])
+    def test_store(self, exists):
+        store, table, meta, values, expectedcols = self.setup_test_store()
 
         if exists:
             offsets = [10, 20]
@@ -546,6 +553,23 @@ class TestFeatureTable(object):
         with pytest.raises(
                 OmeroTablesFeatureStore.FeaturePermissionException):
             store.store([], [])
+        self.mox.VerifyAll()
+
+    def test_store_pending_and_flush(self):
+        store, table, meta, values, expectedcols = self.setup_test_store()
+        self.mox.StubOutWithMock(table, 'getHeaders')
+        table.getHeaders().AndReturn(copy.deepcopy(store.cols))
+        table.addData(expectedcols)
+
+        self.mox.ReplayAll()
+        store.store_pending(meta, values)
+        assert [col.values for col in store.cols] == [None, None, None]
+        assert [col.values for col in store.pendingcols] == [
+            [meta[0]], [meta[1]], [values]]
+
+        store.store_flush()
+        assert [col.values for col in store.cols] == [None, None, None]
+        assert store.pendingcols is None
         self.mox.VerifyAll()
 
     def test_fetch_by_metadata(self):
