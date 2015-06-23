@@ -243,15 +243,16 @@ class FeatureTable(AbstractFeatureStore):
     """
 
     def __init__(self, session, name, ft_space, ann_space, ownerid,
-                 metadesc=None, coldesc=None, noopen=False):
+                 metadesc=None, coldesc=None, ofileid=None, noopen=False):
         """
         :param session: An OMERO session
         :param name: The feature table name
         :param ft_space: The feature table namespace
         :param ann_space: The feature annotation namespace
         :param ownerid: User ID of the table owner
-        :param metadesc: See :meth:`new_table`
-        :param coldesc: See :meth:`new_table`
+        :param metadesc: See :meth:`open_or_create_table`
+        :param coldesc: See :meth:`open_or_create_table`
+        :param ofileid: See :meth:`open_or_create_table`
         :param noopen: Don't automatically open a table (manually call
             :meth:new_table or :meth:open_table)
         """
@@ -269,7 +270,7 @@ class FeatureTable(AbstractFeatureStore):
         self.editable = None
         if not noopen:
             self.open_or_create_table(
-                ownerid, metadesc=metadesc, coldesc=coldesc)
+                ownerid, metadesc=metadesc, coldesc=coldesc, ofileid=ofileid)
 
     def _owns_table(func):
         def assert_owns_table(*args, **kwargs):
