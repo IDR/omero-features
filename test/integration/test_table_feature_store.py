@@ -419,16 +419,27 @@ class TestFeatureTable(TableStoreTestHelper):
 
         store.close()
 
-    def test_filter_raw(self):
+    @pytest.mark.parametrize('emptyquery', [True, False])
+    def test_filter_raw(self, emptyquery):
         tid = self.create_table_for_fetch(owned=True, width=1)
 
         store = FeatureTableProxy(
             self.sess, self.name, self.ft_space, self.ann_space)
         store.open_table(omero.model.OriginalFileI(tid))
 
-        rvalues = store.filter_raw('(ImageID==13) | (RoiID==34)')
-        assert len(rvalues) == 2
-        assert sorted(rvalues) == [(-1, 34, [90]), (13, -1, [30])]
+        if emptyquery:
+            rvalues = store.filter_raw('')
+            assert len(rvalues) == 4
+            assert sorted(rvalues) == [
+                (-1, 34, [90]),
+                (12, -1, [10]),
+                (12, 56, [20]),
+                (13, -1, [30]),
+                ]
+        else:
+            rvalues = store.filter_raw('(ImageID==13) | (RoiID==34)')
+            assert len(rvalues) == 2
+            assert sorted(rvalues) == [(-1, 34, [90]), (13, -1, [30])]
 
         store.close()
 

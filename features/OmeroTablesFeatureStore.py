@@ -577,8 +577,11 @@ class FeatureTable(AbstractFeatureStore):
                Note the query syntax is still to be decided
         :return: A list of tuples (Image-ID, Roi-ID, feature-values)
         """
-        offsets = self.table.getWhereList(
-            conditions, {}, 0, self.table.getNumberOfRows(), 0)
+        if conditions:
+            offsets = self.table.getWhereList(
+                conditions, {}, 0, self.table.getNumberOfRows(), 0)
+        else:
+            offsets = range(self.table.getNumberOfRows())
         values = self.chunked_table_read(offsets, self.get_chunk_size())
 
         # Convert into row-wise storage
