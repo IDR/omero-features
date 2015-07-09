@@ -493,6 +493,22 @@ class FeatureTable(AbstractFeatureStore):
             assert len(self.ftnames) == self.cols[-1].size
         return self.ftnames
 
+    def _get_condition(self, k, v):
+        if v is None:
+            return None
+        if isinstance(v, (tuple, list)):
+            cs = []
+            for w in v:
+                c = self._get_condition(k, w)
+                if c is not None:
+                    cs.append(c)
+            if cs:
+                return '(%s)' % ' | '.join(cs)
+            return None
+        if isinstance(self._get_column(k), omero.grid.StringColumn):
+            v = '"%s"' % v.replace('"', '\\"')
+        return '(%s==%s)' % (k, v)
+
     @_owns_table
     def store(self, meta, values, replace=True):
         meta_len = len(self.metadata_names())
@@ -506,7 +522,8 @@ class FeatureTable(AbstractFeatureStore):
         offset = -1
         if replace:
             kvs = zip(self.metadata_names(), meta)
-            conditions = ' & '.join('(%s==%s)' % kv for kv in kvs)
+            conditions = ' & '.join(
+                self._get_condition(kv[0], kv[1]) for kv in kvs)
             offsets = self.table.getWhereList(
                 conditions, {}, 0, self.table.getNumberOfRows(), 0)
             if offsets:
@@ -563,22 +580,6 @@ class FeatureTable(AbstractFeatureStore):
         return [self.feature_row(v) for v in values]
 
     def fetch_by_metadata_raw(self, meta):
-        def getcond(k, v):
-            if not v:
-                return None
-            if isinstance(v, (tuple, list)):
-                cs = []
-                for w in v:
-                    c = getcond(k, w)
-                    if c:
-                        cs.append(c)
-                if cs:
-                    return '(%s)' % ' | '.join(cs)
-                return None
-            if isinstance(self._get_column(k), omero.grid.StringColumn):
-                v = '"%s"' % v.replace('"', '\\"')
-            return '(%s==%s)' % (k, v)
-
         try:
             kvs = meta.iteritems()
         except AttributeError:
@@ -590,7 +591,7 @@ class FeatureTable(AbstractFeatureStore):
 
         conditions = []
         for kv in kvs:
-            c = getcond(kv[0], kv[1])
+            c = self._get_condition(kv[0], kv[1])
             if c:
                 conditions.append(c)
         conditions = ' & '.join(conditions)

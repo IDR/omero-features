@@ -564,6 +564,27 @@ class TestFeatureTable(object):
 
         return store, table, meta, values, expectedcols
 
+    def test_get_condition(self):
+        store = MockFeatureTable(None)
+        store.cols = [
+            MockColumn(name='a'), omero.grid.StringColumn(name='b', size=8),
+            MockColumn(name='c', size=1)]
+
+        assert store._get_condition('a', None) is None
+        assert store._get_condition('a', [None, None]) is None
+        assert store._get_condition('a', 1) == '(a==1)'
+        assert store._get_condition('a', [1]) == '((a==1))'
+        assert store._get_condition('a', (1,)) == '((a==1))'
+        assert store._get_condition('a', [1, 2]) == '((a==1) | (a==2))'
+        assert store._get_condition('a', (1, None, 2)) == '((a==1) | (a==2))'
+
+        assert store._get_condition('b', 'ab') == '(b=="ab")'
+        assert store._get_condition('b', 'a"b') == '(b=="a\\"b")'
+        assert store._get_condition('b', ['a', None]) == '((b=="a"))'
+        assert store._get_condition('b', ['a', '']) == '((b=="a") | (b==""))'
+        assert store._get_condition('b', ['a"b', '', 'c " " d']) == (
+            '((b=="a\\"b") | (b=="") | (b=="c \\" \\" d"))')
+
     @pytest.mark.parametrize('exists', [True, False])
     def test_store(self, exists):
         store, table, meta, values, expectedcols = self.setup_test_store()
