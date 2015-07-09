@@ -65,11 +65,12 @@ class TableStoreHelper(object):
 
     @staticmethod
     def get_columns(w):
-        meta = [('Image', 'ImageID'), ('Roi', 'RoiID')]
+        meta = [('Image', 'ImageID'), ('Roi', 'RoiID'), ('String', 'Name', 8)]
         ftnames = ['x%d' % n for n in xrange(1, w + 1)]
         cols = [
             omero.grid.ImageColumn('ImageID'),
             omero.grid.RoiColumn('RoiID'),
+            omero.grid.StringColumn('Name', size=8),
             omero.grid.DoubleArrayColumn(','.join(ftnames), '', w),
         ]
         return cols, meta, ftnames
@@ -226,42 +227,46 @@ class TestFeatureTable(TableStoreTestHelper):
         store.open_table(omero.model.OriginalFileI(tid))
 
         if exists:
-            store.store([imageid, -1], [10, 20])
+            store.store([imageid, -1, 'aa'], [10, 20])
             assert store.table.getNumberOfRows() == 1
 
-        store.store([imageid, -1], [10, 20], replace=replace)
+        store.store([imageid, -1, 'aa'], [10, 20], replace=replace)
 
         if exists and not replace:
             assert store.table.getNumberOfRows() == 2
             d = store.table.readCoordinates(range(0, 2)).columns
-            assert len(d) == 3
+            assert len(d) == 4
             assert d[0].values == [imageid, imageid]
             assert d[1].values == [-1, -1]
-            assert d[2].values == [[10, 20], [10, 20]]
+            assert d[2].values == ['aa', 'aa']
+            assert d[3].values == [[10, 20], [10, 20]]
         else:
             assert store.table.getNumberOfRows() == 1
             d = store.table.readCoordinates(range(0, 1)).columns
-            assert len(d) == 3
+            assert len(d) == 4
             assert d[0].values == [imageid]
             assert d[1].values == [-1]
-            assert d[2].values == [[10, 20]]
+            assert d[2].values == ['aa']
+            assert d[3].values == [[10, 20]]
 
-        store.store([-1, roiid], [90, 80], replace=replace)
+        store.store([-1, roiid, 'bb'], [90, 80], replace=replace)
 
         if exists and not replace:
             assert store.table.getNumberOfRows() == 3
             d = store.table.readCoordinates(range(0, 3)).columns
-            assert len(d) == 3
+            assert len(d) == 4
             assert d[0].values == [imageid, imageid, -1]
             assert d[1].values == [-1, -1, roiid]
-            assert d[2].values == [[10, 20], [10, 20], [90, 80]]
+            assert d[2].values == ['aa', 'aa', 'bb']
+            assert d[3].values == [[10, 20], [10, 20], [90, 80]]
         else:
             assert store.table.getNumberOfRows() == 2
             d = store.table.readCoordinates(range(0, 2)).columns
-            assert len(d) == 3
+            assert len(d) == 4
             assert d[0].values == [imageid, -1]
             assert d[1].values == [-1, roiid]
-            assert d[2].values == [[10, 20], [90, 80]]
+            assert d[2].values == ['aa', 'bb']
+            assert d[3].values == [[10, 20], [90, 80]]
 
         # qs = self.sess.getQueryService()
         # q = 'SELECT l.child FROM %sAnnotationLink l WHERE l.parent.id=%d'
@@ -292,7 +297,7 @@ class TestFeatureTable(TableStoreTestHelper):
 
         with pytest.raises(
                 OmeroTablesFeatureStore.FeaturePermissionException):
-            store.store([0, 0], [10, 20])
+            store.store([0, 0, ''], [10, 20])
 
         store.close()
 
@@ -308,19 +313,20 @@ class TestFeatureTable(TableStoreTestHelper):
             self.sess, self.name, self.ft_space, self.ann_space)
         store.open_table(omero.model.OriginalFileI(tid))
 
-        store.store_pending([imageid, -1], [10, 20])
+        store.store_pending([imageid, -1, 'aa'], [10, 20])
         assert store.table.getNumberOfRows() == 0
-        store.store_pending([-1, roiid], [90, 80])
+        store.store_pending([-1, roiid, 'bb'], [90, 80])
         assert store.table.getNumberOfRows() == 0
 
         store.store_flush()
 
         assert store.table.getNumberOfRows() == 2
         d = store.table.readCoordinates(range(0, 2)).columns
-        assert len(d) == 3
+        assert len(d) == 4
         assert d[0].values == [imageid, -1]
         assert d[1].values == [-1, roiid]
-        assert d[2].values == [[10, 20], [90, 80]]
+        assert d[2].values == ['aa', 'bb']
+        assert d[3].values == [[10, 20], [90, 80]]
 
         store.store_flush()
         assert store.table.getNumberOfRows() == 2
@@ -339,17 +345,18 @@ class TestFeatureTable(TableStoreTestHelper):
 
         tcols[0].values = [12, -1, 12, 13]
         tcols[1].values = [-1, 34, 56, -1]
+        tcols[2].values = ['aa', 'bb', 'cc', 'dd']
         if width == 1:
-            tcols[2].values = [[10], [90], [20], [30]]
+            tcols[3].values = [[10], [90], [20], [30]]
         else:
-            tcols[2].values = [[20, 30], [80, 70], [40, 50], [60, 70]]
+            tcols[3].values = [[20, 30], [80, 70], [40, 50], [60, 70]]
         table = tablesess.sharedResources().openTable(
             omero.model.OriginalFileI(tid))
         table.addData(tcols)
         table.close()
         return tid
 
-    @pytest.mark.parametrize('meta', [{'ImageID': 13}, [13, None]])
+    @pytest.mark.parametrize('meta', [{'ImageID': 13}, [13, None, None]])
     def test_fetch_by_metadata1(self, meta):
         tid = self.create_table_for_fetch(owned=True, width=1)
         store = FeatureTableProxy(
@@ -360,14 +367,15 @@ class TestFeatureTable(TableStoreTestHelper):
 
         assert len(fr) == 1
         fr = fr[0]
-        assert fr.infonames == ['ImageID', 'RoiID']
-        assert fr.infovalues == (13, -1)
+        assert fr.infonames == ['ImageID', 'RoiID', 'Name']
+        assert fr.infovalues == (13, -1, 'dd')
         assert fr.names == ['x1']
         assert fr.values == [30]
 
         store.close()
 
-    @pytest.mark.parametrize('meta', [{'ImageID': 12, 'RoiID': 56}, [12, 56]])
+    @pytest.mark.parametrize('meta', [
+        {'ImageID': 12, 'RoiID': 56, 'Name': 'cc'}, [12, 56, 'cc']])
     def test_fetch_by_metadata2(self, meta):
         tid = self.create_table_for_fetch(owned=True, width=1)
         store = FeatureTableProxy(
@@ -378,14 +386,14 @@ class TestFeatureTable(TableStoreTestHelper):
 
         assert len(fr) == 1
         fr = fr[0]
-        assert fr.infonames == ['ImageID', 'RoiID']
-        assert fr.infovalues == (12, 56)
+        assert fr.infonames == ['ImageID', 'RoiID', 'Name']
+        assert fr.infovalues == (12, 56, 'cc')
         assert fr.names == ['x1']
         assert fr.values == [20]
 
         store.close()
 
-    @pytest.mark.parametrize('meta', [{'ImageID': 12}, [12, None]])
+    @pytest.mark.parametrize('meta', [{'ImageID': 12}, [12, None, None]])
     @pytest.mark.parametrize('width', [1, 2])
     def test_fetch_by_metadata_raw(self, meta, width):
         tid = self.create_table_for_fetch(owned=True, width=width)
@@ -397,11 +405,11 @@ class TestFeatureTable(TableStoreTestHelper):
 
         assert len(rvalues) == 2
         if width == 1:
-            assert rvalues[0] == (12, -1, [10])
-            assert rvalues[1] == (12, 56, [20])
+            assert rvalues[0] == (12, -1, 'aa', [10])
+            assert rvalues[1] == (12, 56, 'cc', [20])
         else:
-            assert rvalues[0] == (12, -1, [20, 30])
-            assert rvalues[1] == (12, 56, [40, 50])
+            assert rvalues[0] == (12, -1, 'aa', [20, 30])
+            assert rvalues[1] == (12, 56, 'cc', [40, 50])
 
         store.close()
 
@@ -411,10 +419,10 @@ class TestFeatureTable(TableStoreTestHelper):
             self.sess, self.name, self.ft_space, self.ann_space)
         store.open_table(omero.model.OriginalFileI(tid))
 
-        fr = store.filter('(ImageID==12345) | (RoiID==34)')
+        fr = store.filter('(ImageID==12345) | (RoiID==34) | (Name=="abcde")')
         assert len(fr) == 1
-        assert fr[0].infonames == ['ImageID', 'RoiID']
-        assert fr[0].infovalues == (-1, 34)
+        assert fr[0].infonames == ['ImageID', 'RoiID', 'Name']
+        assert fr[0].infovalues == (-1, 34, 'bb')
         assert fr[0].names == ['x1']
         assert fr[0].values == [90]
 
@@ -432,15 +440,20 @@ class TestFeatureTable(TableStoreTestHelper):
             rvalues = store.filter_raw('')
             assert len(rvalues) == 4
             assert sorted(rvalues) == [
-                (-1, 34, [90]),
-                (12, -1, [10]),
-                (12, 56, [20]),
-                (13, -1, [30]),
+                (-1, 34, 'bb', [90]),
+                (12, -1, 'aa', [10]),
+                (12, 56, 'cc', [20]),
+                (13, -1, 'dd', [30]),
                 ]
         else:
-            rvalues = store.filter_raw('(ImageID==13) | (RoiID==34)')
-            assert len(rvalues) == 2
-            assert sorted(rvalues) == [(-1, 34, [90]), (13, -1, [30])]
+            rvalues = store.filter_raw(
+                '(ImageID==13) | (RoiID==34) | (Name=="cc")')
+            assert len(rvalues) == 3
+            assert sorted(rvalues) == [
+                (-1, 34, 'bb', [90]),
+                (12, 56, 'cc', [20]),
+                (13, -1, 'dd', [30]),
+                ]
 
         store.close()
 
