@@ -262,6 +262,7 @@ class FeatureTable(AbstractFeatureStore):
         self.ft_space = ft_space
         self.ann_space = ann_space
         self.cols = None
+        self.colnamemap = None
         self.pendingcols = None
         self.table = None
         self.metanames = None
@@ -292,6 +293,7 @@ class FeatureTable(AbstractFeatureStore):
             self.table.close()
             self.table = None
             self.cols = None
+            self.colnamemap = None
             self.ftnames = None
             self.editable = None
 
@@ -463,6 +465,17 @@ class FeatureTable(AbstractFeatureStore):
             raise OmeroTableException(
                 'Failed to get columns for table ID:%d' % tid)
 
+    def _get_column(self, name):
+        """
+        Get a table column header by name
+        """
+        if not self.colnamemap:
+            self.colnamemap = dict((c.name, c) for c in self.cols)
+        try:
+            return self.colnamemap[name]
+        except KeyError as e:
+            raise OmeroTableException('Unknown column name: %s' % e)
+
     def metadata_names(self):
         """
         Get the list of metadata names
@@ -550,6 +563,22 @@ class FeatureTable(AbstractFeatureStore):
         return [self.feature_row(v) for v in values]
 
     def fetch_by_metadata_raw(self, meta):
+        def getcond(k, v):
+            if not v:
+                return None
+            if isinstance(v, (tuple, list)):
+                cs = []
+                for w in v:
+                    c = getcond(k, w)
+                    if c:
+                        cs.append(c)
+                if cs:
+                    return '(%s)' % ' | '.join(cs)
+                return None
+            if isinstance(self._get_column(k), omero.grid.StringColumn):
+                v = '"%s"' % v.replace('"', '\\"')
+            return '(%s==%s)' % (k, v)
+
         try:
             kvs = meta.iteritems()
         except AttributeError:
@@ -559,7 +588,11 @@ class FeatureTable(AbstractFeatureStore):
                     'Expected %d metadata values' % meta_len)
             kvs = zip(self.metadata_names(), meta)
 
-        conditions = ['(%s==%s)' % kv for kv in kvs if kv[1] is not None]
+        conditions = []
+        for kv in kvs:
+            c = getcond(kv[0], kv[1])
+            if c:
+                conditions.append(c)
         conditions = ' & '.join(conditions)
         values = self.filter_raw(conditions)
         return values

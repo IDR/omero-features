@@ -42,6 +42,7 @@ class FeatureTableProxy(OmeroTablesFeatureStore.FeatureTable):
         self.ft_space = ft_space
         self.ann_space = ann_space
         self.cols = None
+        self.colnamemap = None
         self.pendingcols = None
         self.table = None
         self.metanames = None

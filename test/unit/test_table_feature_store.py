@@ -251,6 +251,7 @@ class MockFeatureTable(OmeroTablesFeatureStore.FeatureTable):
         self.ft_space = '/test/features/ft_space'
         self.ann_space = '/test/features/ann_space'
         self.cols = None
+        self.colnamemap = None
         self.pendingcols = None
         self.table = None
         self.metanames = None
@@ -497,6 +498,21 @@ class TestFeatureTable(object):
         assert store.cols == cols
         self.mox.VerifyAll()
 
+    def test_get_column(self):
+        store = MockFeatureTable(None)
+        cola = MockColumn(name='a')
+        colb = MockColumn(name='b')
+        colc = MockColumn(name='c')
+        store.cols = [cola, colb, colc]
+
+        assert store._get_column('a') == cola
+        assert store.colnamemap == {'a': cola, 'b': colb, 'c': colc}
+        assert store._get_column('b') == colb
+        assert store._get_column('c') == colc
+
+        with pytest.raises(OmeroTablesFeatureStore.OmeroTableException):
+            store._get_column('non-existent')
+
     def test_metadata_names(self):
         table = self.mox.CreateMock(MockTable)
         store = MockFeatureTable(None)
@@ -611,6 +627,7 @@ class TestFeatureTable(object):
 
     def test_fetch_by_metadata(self):
         store = MockFeatureTable(None)
+        store.cols = [MockColumn(name='a')]
         self.mox.StubOutWithMock(store, 'filter_raw')
         self.mox.StubOutWithMock(store, 'feature_row')
 
@@ -638,6 +655,25 @@ class TestFeatureTable(object):
         rs = (1, 2, [0])
 
         store.filter_raw('(a==1) & (b==2)').AndReturn([rs])
+
+        self.mox.ReplayAll()
+        assert store.fetch_by_metadata_raw(meta) == [rs]
+        self.mox.VerifyAll()
+
+    def test_fetch_by_metadata_raw_complex_query(self):
+        table = self.mox.CreateMock(MockTable)
+        store = MockFeatureTable(None)
+        store.table = table
+        store.cols = [
+            MockColumn(name='a'), omero.grid.StringColumn(name='b', size=8),
+            MockColumn(name='c', size=1)]
+
+        self.mox.StubOutWithMock(store, 'filter_raw')
+        rs = (1, 'string', [0])
+
+        meta = {'a': None, 'a': [1, 2, 4], 'b': 'str"ing'}
+        expected = '((a==1) | (a==2) | (a==4)) & (b=="str\\"ing")'
+        store.filter_raw(expected).AndReturn([rs])
 
         self.mox.ReplayAll()
         assert store.fetch_by_metadata_raw(meta) == [rs]
