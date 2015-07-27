@@ -182,10 +182,13 @@ class MockOriginalFile:
 
 
 class MockColumn:
-    def __init__(self, name=None, values=None, size=None):
+    def __init__(self, name=None, values=None, size=None, desc=None):
         self.name = name
         self.values = values
         self.size = size
+        self.description = None
+        if desc:
+            self.description = '{"columntype":"%s"}' % desc
 
     def __eq__(self, o):
         return (self.name == o.name and self.values == o.values and
@@ -252,6 +255,9 @@ class MockFeatureTable(OmeroTablesFeatureStore.FeatureTable):
         self.ann_space = '/test/features/ann_space'
         self.cols = None
         self.colnamemap = None
+        self.metacols = None
+        self.singleftcols = None
+        self.multiftcols = None
         self.pendingcols = None
         self.table = None
         self.metanames = None
@@ -374,6 +380,42 @@ class TestFeatureTable(object):
             with pytest.raises(OmeroTablesFeatureStore.TableUsageException):
                 store.get_table()
 
+    def test_column_from_desc(self):
+        store = MockFeatureTable(None)
+        expected = [
+            omero.grid.DoubleColumn('d', '{"columntype": "metadata"}'),
+            omero.grid.StringColumn('s', '{"columntype": "metadata"}', 2),
+        ]
+        cols = [store._column_from_desc(('Double', 'd')),
+                store._column_from_desc(('String', 's', 2))]
+        assert self.columns_equal(expected, cols)
+
+    def test_get_column_json(self):
+        store = MockFeatureTable(None)
+        assert store._get_column_json('multifeature') == (
+            '{"columntype": "multifeature"}')
+
+    def test_get_column_type(self):
+        store = MockFeatureTable(None)
+        col = MockColumn(name='a', desc='metadata')
+        assert store._get_column_type(col) == 'metadata'
+
+    def test_get_cols(self):
+        store = MockFeatureTable(None)
+        table = self.mox.CreateMock(MockTable)
+        self.mox.StubOutWithMock(table, 'getHeaders')
+        cols = (
+            MockColumn(name='a', desc='metadata'),
+            MockColumn(name='b', desc='metadata'), MockColumn(desc='feature'))
+        table.getHeaders().AndReturn(cols)
+        store.table = table
+
+        self.mox.ReplayAll()
+        store._get_cols()
+        assert store.metacols == (0, 1)
+        assert store.singleftcols == (2,)
+        assert store.multiftcols == ()
+
     @pytest.mark.parametrize('opened', [True, False])
     @pytest.mark.parametrize('create', [True, False])
     @pytest.mark.parametrize('owned', [True, False])
@@ -458,11 +500,12 @@ class TestFeatureTable(object):
         mf = MockOriginalFile(1, 'table-name', store.ft_space)
         table.getOriginalFile().AndReturn(mf)
 
-        tcols = [
-            omero.grid.ImageColumn('ImageID', ''),
-            omero.grid.RoiColumn('RoiID', ''),
-            omero.grid.DoubleArrayColumn('x', '', 1),
-        ]
+        tcols = (
+            omero.grid.ImageColumn('ImageID', '{"columntype": "metadata"}'),
+            omero.grid.RoiColumn('RoiID', '{"columntype": "metadata"}'),
+            omero.grid.DoubleArrayColumn(
+                'x', '{"columntype": "multifeature"}', 1),
+        )
         meta = [('Image', 'ImageID'), ('Roi', 'RoiID')]
         desc = ['x']
 
@@ -488,7 +531,7 @@ class TestFeatureTable(object):
         table = self.mox.CreateMock(MockTable)
         session = MockSession(1, table, None)
         store = MockFeatureTable(session)
-        cols = [object]
+        cols = (MockColumn(desc='metadata'),)
 
         table.getHeaders().AndReturn(cols)
         self.mox.ReplayAll()
@@ -517,11 +560,13 @@ class TestFeatureTable(object):
         table = self.mox.CreateMock(MockTable)
         store = MockFeatureTable(None)
         store.table = table
-        store.cols = [
-            MockColumn(name='a'), MockColumn(name='b'), MockColumn()]
+        store.cols = (
+            MockColumn(name='a', desc='metadata'),
+            MockColumn(name='b', desc='metadata'), MockColumn(desc='feature'))
+        store.metacols = (0, 1)
 
         self.mox.ReplayAll()
-        assert store.metadata_names() == ['a', 'b']
+        assert store.metadata_names() == ('a', 'b')
         self.mox.VerifyAll()
 
     def test_feature_names(self):
@@ -530,9 +575,10 @@ class TestFeatureTable(object):
         store.table = table
         store.cols = [
             MockColumn(), MockColumn(), MockColumn(name='a,b', size=2)]
+        store.multiftcols = (2,)
 
         self.mox.ReplayAll()
-        assert store.feature_names() == ['a', 'b']
+        assert store.feature_names() == ('a', 'b')
         self.mox.VerifyAll()
 
     def setup_test_store(self):
@@ -544,6 +590,8 @@ class TestFeatureTable(object):
         store.table = table
         store.cols = [MockColumn('a'), MockColumn('b'),
                       MockColumn('c', None, 2)]
+        store.metacols = (0, 1)
+        store.multiftcols = (2,)
 
         self.mox.StubOutWithMock(perms, 'can_edit')
         self.mox.StubOutWithMock(table, 'getOriginalFile')
@@ -584,6 +632,29 @@ class TestFeatureTable(object):
         assert store._get_condition('b', ['a', '']) == '((b=="a") | (b==""))'
         assert store._get_condition('b', ['a"b', '', 'c " " d']) == (
             '((b=="a\\"b") | (b=="") | (b=="c \\" \\" d"))')
+
+    def test_vals_to_cols(self):
+        store = MockFeatureTable(None)
+        store.cols = [
+            MockColumn(name='a', values=[]),
+            omero.grid.StringColumn(name='b', values=[], size=8),
+            MockColumn(name='c,d', values=[], size=2)]
+        store.metacols = (0, 1)
+        store.multiftcols = (2,)
+
+        store._vals_to_cols(store.cols, [1, 'abc'], [2, 3])
+        assert store.cols[0].values == [1]
+        assert store.cols[1].values == ['abc']
+        assert store.cols[2].values == [[2, 3]]
+
+    def test_colrow_to_vals(self):
+        store = MockFeatureTable(None)
+        store.metacols = (0, 1)
+        store.multiftcols = (2,)
+
+        metas, values = store._colrow_to_vals((1, 'abc', [2, 3]))
+        assert metas == (1, 'abc')
+        assert values == (2, 3)
 
     @pytest.mark.parametrize('exists', [True, False])
     def test_store(self, exists):
@@ -671,6 +742,8 @@ class TestFeatureTable(object):
         store.cols = [
             MockColumn(name='a'), MockColumn(name='b'),
             MockColumn(name='c', size=1)]
+        store.metacols = (0, 1)
+        store.ftcols = (2,)
 
         self.mox.StubOutWithMock(store, 'filter_raw')
         rs = (1, 2, [0])
@@ -761,20 +834,22 @@ class TestFeatureTable(object):
 
     def test_feature_row(self):
         store = MockFeatureTable(None)
-        store.cols = [MockColumn('ma'), MockColumn('mb'),
-                      MockColumn()]
+        store.cols = (
+            MockColumn('ma'), MockColumn('mb'), MockColumn())
+        store.metacols = (0, 1)
+        store.multiftcols = (2,)
         self.mox.StubOutWithMock(store, 'metadata_names')
         self.mox.StubOutWithMock(store, 'feature_names')
-        store.metadata_names().AndReturn(['ma', 'mb'])
-        store.feature_names().AndReturn(['a', 'b'])
-        row = [10, 20, [1, 2]]
+        store.metadata_names().AndReturn(('ma', 'mb'))
+        store.feature_names().AndReturn(('a', 'b'))
+        row = [10, 20, (1, 2)]
 
         self.mox.ReplayAll()
         rv = store.feature_row(row)
-        assert rv.names == ['a', 'b']
-        assert rv.values == [1, 2]
-        assert rv.infonames == ['ma', 'mb']
-        assert rv.infovalues == [10, 20]
+        assert rv.names == ('a', 'b')
+        assert rv.values == (1, 2)
+        assert rv.infonames == ('ma', 'mb')
+        assert rv.infovalues == (10, 20)
         self.mox.VerifyAll()
 
     def test_get_chunk_size(self):

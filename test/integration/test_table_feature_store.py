@@ -43,6 +43,9 @@ class FeatureTableProxy(OmeroTablesFeatureStore.FeatureTable):
         self.ann_space = ann_space
         self.cols = None
         self.colnamemap = None
+        self.metacols = None
+        self.singleftcols = None
+        self.multiftcols = None
         self.pendingcols = None
         self.table = None
         self.metanames = None
@@ -66,12 +69,14 @@ class TableStoreHelper(object):
     @staticmethod
     def get_columns(w):
         meta = [('Image', 'ImageID'), ('Roi', 'RoiID'), ('String', 'Name', 8)]
-        ftnames = ['x%d' % n for n in xrange(1, w + 1)]
+        ftnames = tuple('x%d' % n for n in xrange(1, w + 1))
         cols = [
-            omero.grid.ImageColumn('ImageID'),
-            omero.grid.RoiColumn('RoiID'),
-            omero.grid.StringColumn('Name', size=8),
-            omero.grid.DoubleArrayColumn(','.join(ftnames), '', w),
+            omero.grid.ImageColumn('ImageID', '{"columntype": "metadata"}'),
+            omero.grid.RoiColumn('RoiID', '{"columntype": "metadata"}'),
+            omero.grid.StringColumn(
+                'Name', '{"columntype": "metadata"}', size=8),
+            omero.grid.DoubleArrayColumn(
+                ','.join(ftnames), '{"columntype": "multifeature"}', w),
         ]
         return cols, meta, ftnames
 
@@ -186,7 +191,7 @@ class TestFeatureTable(TableStoreTestHelper):
         assert store.table
         TableStoreHelper.assert_coltypes_equal(store.cols, tcols)
 
-        assert store.metadata_names() == [m[1] for m in meta]
+        assert store.metadata_names() == tuple(m[1] for m in meta)
         assert store.feature_names() == ftnames
 
         # Need to reload
@@ -207,7 +212,7 @@ class TestFeatureTable(TableStoreTestHelper):
         store.open_table(omero.model.OriginalFileI(tid))
         assert store.table
         TableStoreHelper.assert_coltypes_equal(store.cols, tcols)
-        assert store.metadata_names() == [m[1] for m in meta]
+        assert store.metadata_names() == tuple(m[1] for m in meta)
         assert store.feature_names() == ftnames
 
         store.close()
@@ -367,10 +372,10 @@ class TestFeatureTable(TableStoreTestHelper):
 
         assert len(fr) == 1
         fr = fr[0]
-        assert fr.infonames == ['ImageID', 'RoiID', 'Name']
+        assert fr.infonames == ('ImageID', 'RoiID', 'Name')
         assert fr.infovalues == (13, -1, 'dd')
-        assert fr.names == ['x1']
-        assert fr.values == [30]
+        assert fr.names == ('x1',)
+        assert fr.values == (30,)
 
         store.close()
 
@@ -386,10 +391,10 @@ class TestFeatureTable(TableStoreTestHelper):
 
         assert len(fr) == 1
         fr = fr[0]
-        assert fr.infonames == ['ImageID', 'RoiID', 'Name']
+        assert fr.infonames == ('ImageID', 'RoiID', 'Name')
         assert fr.infovalues == (12, 56, 'cc')
-        assert fr.names == ['x1']
-        assert fr.values == [20]
+        assert fr.names == ('x1',)
+        assert fr.values == (20,)
 
         store.close()
 
@@ -421,10 +426,10 @@ class TestFeatureTable(TableStoreTestHelper):
 
         fr = store.filter('(ImageID==12345) | (RoiID==34) | (Name=="abcde")')
         assert len(fr) == 1
-        assert fr[0].infonames == ['ImageID', 'RoiID', 'Name']
+        assert fr[0].infonames == ('ImageID', 'RoiID', 'Name')
         assert fr[0].infovalues == (-1, 34, 'bb')
-        assert fr[0].names == ['x1']
-        assert fr[0].values == [90]
+        assert fr[0].names == ('x1',)
+        assert fr[0].values == (90,)
 
         store.close()
 
@@ -569,15 +574,16 @@ class TestFeatureTableManager(TableStoreTestHelper):
 
     def test_create(self, fsname='fsname-create'):
         meta = [('Image', 'ImageID'), ('Roi', 'RoiID')]
-        colnames = ['x1', 'x2']
+        colnames = ('x1', 'x2')
         fts = OmeroTablesFeatureStore.FeatureTableManager(
             self.sess, ft_space=self.ft_space, ann_space=self.ann_space)
         fs = fts.create(fsname, meta, colnames)
 
         expected_cols = [
-            omero.grid.ImageColumn('ImageID', ''),
-            omero.grid.RoiColumn('RoiID', ''),
-            omero.grid.DoubleArrayColumn('x1,x2', '', 2),
+            omero.grid.ImageColumn('ImageID', '{"columntype": "metadata"}'),
+            omero.grid.RoiColumn('RoiID', '{"columntype": "metadata"}'),
+            omero.grid.DoubleArrayColumn(
+                'x1,x2', '{"columntype": "multifeature"}', 2),
         ]
         h = fs.get_table().getHeaders()
         TableStoreHelper.assert_coltypes_equal(expected_cols, h)
