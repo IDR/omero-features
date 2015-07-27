@@ -30,6 +30,7 @@ import omero.clients
 from omero.rtypes import unwrap, wrap
 
 import itertools
+import json
 import re
 
 import logging
@@ -49,6 +50,14 @@ META_COLUMN_TYPES = [t for t in COLUMN_TYPES if not t.endswith('Array')]
 
 # Indicates the object ID is unknown
 NOID = -1
+
+# Internal feature column classes:
+# Metadata column
+_COLUMN_METADATA = 'metadata'
+# Column is an ArrayColumn containing multiple features (should be split)
+_COLUMN_MULTIPLE_FEATURE = 'multifeature'
+# Column contains a single feature (which may be an ArrayColumn)
+_COLUMN_SINGLE_FEATURE = 'feature'
 
 
 class TableStoreException(Exception):
@@ -263,6 +272,9 @@ class FeatureTable(AbstractFeatureStore):
         self.ann_space = ann_space
         self.cols = None
         self.colnamemap = None
+        self.metacols = None
+        self.singleftcols = None
+        self.multiftcols = None
         self.pendingcols = None
         self.table = None
         self.metanames = None
@@ -294,6 +306,9 @@ class FeatureTable(AbstractFeatureStore):
             self.table = None
             self.cols = None
             self.colnamemap = None
+            self.metacols = None
+            self.singleftcols = None
+            self.multiftcols = None
             self.ftnames = None
             self.editable = None
 
@@ -362,11 +377,68 @@ class FeatureTable(AbstractFeatureStore):
         Create an omero.grid.*Column from a metadata description
         """
         coltype = getattr(omero.grid, desc[0] + 'Column')
+        d = self._get_column_json(_COLUMN_METADATA)
         if len(desc) > 2:
-            col = coltype(desc[1], '', desc[2])
+            col = coltype(desc[1], d, desc[2])
         else:
-            col = coltype(desc[1], '')
+            col = coltype(desc[1], d)
         return col
+
+    def _get_column_json(self, columntype):
+        """
+        Creates a json block for a column's description field
+        """
+        assert columntype in (
+            _COLUMN_METADATA, _COLUMN_MULTIPLE_FEATURE, _COLUMN_SINGLE_FEATURE)
+        return json.dumps({'columntype': columntype})
+
+    def _get_column_type(self, col):
+        """
+        Parses the column's json description and returns the column type, or
+        None if it couldn't be parsed
+        """
+        try:
+            return json.loads(col.description)['columntype']
+        except (ValueError, KeyError):
+            return None
+
+    def _get_cols(self):
+        """
+        Get the table headers, splitting them into metadata and feature cols
+        """
+        self.cols = tuple(self.table.getHeaders())
+        if not self.cols:
+            tid = unwrap(self.table.getOriginalFile().getId())
+            raise OmeroTableException(
+                'Failed to get columns for table ID:%d' % tid)
+
+        self.metacols = []
+        self.singleftcols = []
+        self.multiftcols = []
+
+        for n in xrange(len(self.cols)):
+            col = self.cols[n]
+            if self._get_column_type(col) == _COLUMN_METADATA:
+                self.metacols.append(n)
+            elif self._get_column_type(col) == _COLUMN_SINGLE_FEATURE:
+                if self.multiftcols:
+                    raise TableUsageException(
+                        'Mixing single and multiple feature columns '
+                        'is not supported')
+                self.singleftcols.append(n)
+            elif self._get_column_type(col) == _COLUMN_MULTIPLE_FEATURE:
+                if self.singleftcols:
+                    raise TableUsageException(
+                        'Mixing single and multiple feature columns '
+                        'is not supported')
+                self.multiftcols.append(n)
+            else:
+                raise OmeroTableException(
+                    'Unknown metadata/feature column type')
+
+        self.metacols = tuple(self.metacols)
+        self.singleftcols = tuple(self.singleftcols)
+        self.multiftcols = tuple(self.multiftcols)
 
     def new_table(self, metadesc, coldesc):
         """
@@ -436,8 +508,10 @@ class FeatureTable(AbstractFeatureStore):
         if len(names) > 64000:
             log.warn(
                 'Feature names may exceed the limit of the current Tables API')
+
+        d = self._get_column_json(_COLUMN_MULTIPLE_FEATURE)
         coldef.append(omero.grid.DoubleArrayColumn(
-            names, '', len(coldesc)))
+            names, d, len(coldesc)))
 
         try:
             self.table.initialize(coldef)
@@ -445,10 +519,7 @@ class FeatureTable(AbstractFeatureStore):
             log.error('Failed to initialize table, deleting: %d', tid)
             self.session.getUpdateService().deleteObject(tof)
             raise
-        self.cols = self.table.getHeaders()
-        if not self.cols:
-            raise OmeroTableException(
-                'Failed to get columns for table ID:%d' % tid)
+        self._get_cols()
 
     def open_table(self, tablefile):
         """
@@ -460,10 +531,7 @@ class FeatureTable(AbstractFeatureStore):
         self.table = self.session.sharedResources().openTable(tablefile)
         if not self.table:
             raise OmeroTableException('Failed to open table ID:%d' % tid)
-        self.cols = self.table.getHeaders()
-        if not self.cols:
-            raise OmeroTableException(
-                'Failed to get columns for table ID:%d' % tid)
+        self._get_cols()
 
     def _get_column(self, name):
         """
@@ -481,7 +549,7 @@ class FeatureTable(AbstractFeatureStore):
         Get the list of metadata names
         """
         if not self.metanames:
-            self.metanames = [col.name for col in self.cols[:-1]]
+            self.metanames = tuple(self.cols[n].name for n in self.metacols)
         return self.metanames
 
     def feature_names(self):
@@ -489,8 +557,16 @@ class FeatureTable(AbstractFeatureStore):
         Get the list of feature names
         """
         if not self.ftnames:
-            self.ftnames = self.cols[-1].name.split(',')
-            assert len(self.ftnames) == self.cols[-1].size
+            if self.singleftcols:
+                self.ftnames = tuple(
+                    self.cols[n].name for n in self.singleftcols)
+            else:
+                self.ftnames = []
+                for n in self.multiftcols:
+                    names = self.cols[n].name.split(',')
+                    assert len(names) == self.cols[n].size
+                    self.ftnames.extend(names)
+                self.ftnames = tuple(self.ftnames)
         return self.ftnames
 
     def _get_condition(self, k, v):
@@ -509,15 +585,54 @@ class FeatureTable(AbstractFeatureStore):
             v = '"%s"' % v.replace('"', '\\"')
         return '(%s==%s)' % (k, v)
 
-    @_owns_table
-    def store(self, meta, values, replace=True):
-        meta_len = len(self.metadata_names())
-
+    def _vals_to_cols(self, cols, meta, values):
+        """
+        Append a row into a set of columns, handles the mix of metadata
+        and feature column types
+        """
+        meta_len = len(self.metacols)
         if len(meta) != meta_len:
             raise TableUsageException('Expected %d metadata values' % meta_len)
 
-        for n in xrange(meta_len):
-            self.cols[n].values = [meta[n]]
+        ft_len = len(self.singleftcols) if self.singleftcols else sum(
+            cols[n].size for n in self.multiftcols)
+        if len(values) != ft_len:
+            raise TableUsageException('Expected %d feature values' % ft_len)
+
+        for n in self.metacols:
+            cols[n].values.append(meta[n])
+
+        if self.singleftcols:
+            for n in self.singleftcols:
+                cols[n].values.append(meta[n])
+        else:
+            p = 0
+            for n in self.multiftcols:
+                q = p + cols[n].size
+                cols[n].values.append(values[p:q])
+                p = q
+
+    def _colrow_to_vals(self, rowvalues):
+        """
+        Split a column row into metadata and feature fields, handles
+        the mix of metadata and feature column types
+        """
+        metas = tuple(rowvalues[n] for n in self.metacols)
+        if self.singleftcols:
+            values = tuple(rowvalues[n] for n in self.singleftcols)
+        else:
+            values = []
+            for n in self.multiftcols:
+                values.extend(rowvalues[n])
+            values = tuple(values)
+        return metas, values
+
+    @_owns_table
+    def store(self, meta, values, replace=True):
+        for col in self.cols:
+            col.values = []
+
+        self._vals_to_cols(self.cols, meta, values)
 
         offset = -1
         if replace:
@@ -528,8 +643,6 @@ class FeatureTable(AbstractFeatureStore):
                 conditions, {}, 0, self.table.getNumberOfRows(), 0)
             if offsets:
                 offset = max(offsets)
-
-        self.cols[-1].values = [values]
 
         if offset > -1:
             data = omero.grid.Data(rowNumbers=[offset], columns=self.cols)
@@ -551,15 +664,7 @@ class FeatureTable(AbstractFeatureStore):
             for col in self.pendingcols:
                 col.values = []
 
-        meta_len = len(self.metadata_names())
-
-        if len(meta) != meta_len:
-            raise TableUsageException('Expected %d metadata values' % meta_len)
-
-        for n in xrange(meta_len):
-            self.pendingcols[n].values.append(meta[n])
-
-        self.pendingcols[-1].values.append(values)
+        self._vals_to_cols(self.pendingcols, meta, values)
 
     @_owns_table
     def store_flush(self):
@@ -609,7 +714,7 @@ class FeatureTable(AbstractFeatureStore):
 
         :param conditions: The query conditions
                Note the query syntax is still to be decided
-        :return: A list of tuples (Image-ID, Roi-ID, feature-values)
+        :return: A list of tuples containing the values for each row
         """
         if conditions:
             offsets = self.table.getWhereList(
@@ -625,7 +730,7 @@ class FeatureTable(AbstractFeatureStore):
             assert len(offsets) == len(v)
         return zip(*values)
 
-    def feature_row(self, values):
+    def feature_row(self, rowvalues):
         """
         Create a FeatureRow object
 
@@ -633,10 +738,10 @@ class FeatureTable(AbstractFeatureStore):
         """
         fnames = self.feature_names()
         mnames = self.metadata_names()
-        assert len(values) == len(mnames) + 1
+        metas, values = self._colrow_to_vals(rowvalues)
         return FeatureRow(
             names=fnames, infonames=mnames,
-            values=values[-1], infovalues=values[:-1])
+            values=values, infovalues=metas)
 
     def get_chunk_size(self):
         """
