@@ -400,21 +400,67 @@ class TestFeatureTable(object):
         col = MockColumn(name='a', desc='metadata')
         assert store._get_column_type(col) == 'metadata'
 
-    def test_get_cols(self):
+    @pytest.mark.parametrize('coltype', ['single', 'multi', 'mixed'])
+    def test_get_cols(self, coltype):
         store = MockFeatureTable(None)
         table = self.mox.CreateMock(MockTable)
         self.mox.StubOutWithMock(table, 'getHeaders')
-        cols = (
-            MockColumn(name='a', desc='metadata'),
-            MockColumn(name='b', desc='metadata'), MockColumn(desc='feature'))
+        cols = [MockColumn(name='a', desc='metadata')]
+        if coltype == 'single':
+            cols.append(MockColumn(desc='feature'))
+        elif coltype == 'multi':
+            cols.append(MockColumn(desc='multifeature'))
+        else:
+            cols.append(MockColumn(desc='feature'))
+            cols.append(MockColumn(desc='multifeature'))
+        table.getHeaders().AndReturn(cols)
+        store.table = table
+
+        self.mox.ReplayAll()
+        if coltype == 'single':
+            store._get_cols()
+            assert store.metacols == (0,)
+            assert store.singleftcols == (1,)
+            assert store.multiftcols == ()
+        elif coltype == 'multi':
+            store._get_cols()
+            assert store.metacols == (0,)
+            assert store.singleftcols == ()
+            assert store.multiftcols == (1,)
+        else:
+            with pytest.raises(OmeroTablesFeatureStore.TableUsageException):
+                store._get_cols()
+
+        self.mox.VerifyAll()
+
+    @pytest.mark.parametrize('coltype', ['single', 'multi'])
+    def test_get_cols_interleaved(self, coltype):
+        store = MockFeatureTable(None)
+        table = self.mox.CreateMock(MockTable)
+        self.mox.StubOutWithMock(table, 'getHeaders')
+        cols = [MockColumn(name='a', desc='metadata'), None,
+                MockColumn(name='b', desc='metadata'), None]
+        if coltype == 'single':
+            cols[1] = MockColumn(desc='feature')
+            cols[3] = MockColumn(desc='feature')
+        else:
+            cols[1] = MockColumn(desc='multifeature')
+            cols[3] = MockColumn(desc='multifeature')
         table.getHeaders().AndReturn(cols)
         store.table = table
 
         self.mox.ReplayAll()
         store._get_cols()
-        assert store.metacols == (0, 1)
-        assert store.singleftcols == (2,)
-        assert store.multiftcols == ()
+        if coltype == 'single':
+            assert store.metacols == (0, 2)
+            assert store.singleftcols == (1, 3)
+            assert store.multiftcols == ()
+        else:
+            assert store.metacols == (0, 2)
+            assert store.singleftcols == ()
+            assert store.multiftcols == (1, 3)
+
+        self.mox.VerifyAll()
 
     @pytest.mark.parametrize('opened', [True, False])
     @pytest.mark.parametrize('create', [True, False])
@@ -569,16 +615,26 @@ class TestFeatureTable(object):
         assert store.metadata_names() == ('a', 'b')
         self.mox.VerifyAll()
 
-    def test_feature_names(self):
+    @pytest.mark.parametrize('coltype', ['single', 'multi'])
+    def test_feature_names(self, coltype):
         table = self.mox.CreateMock(MockTable)
         store = MockFeatureTable(None)
         store.table = table
-        store.cols = [
-            MockColumn(), MockColumn(), MockColumn(name='a,b', size=2)]
-        store.multiftcols = (2,)
+        store.cols = [MockColumn(), MockColumn()]
+        if coltype == 'single':
+            store.cols.extend([
+                MockColumn(name='a'), MockColumn(name='b'),
+                MockColumn(name='c'), MockColumn(name='d'),
+                MockColumn(name='e')])
+            store.singleftcols = (2, 3, 4, 5, 6)
+        else:
+            store.cols.extend([
+                MockColumn(name='a,b', size=2),
+                MockColumn(name='c,d,e', size=3)])
+            store.multiftcols = (2, 3)
 
         self.mox.ReplayAll()
-        assert store.feature_names() == ('a', 'b')
+        assert store.feature_names() == ('a', 'b', 'c', 'd', 'e')
         self.mox.VerifyAll()
 
     def setup_test_store(self):
@@ -633,26 +689,41 @@ class TestFeatureTable(object):
         assert store._get_condition('b', ['a"b', '', 'c " " d']) == (
             '((b=="a\\"b") | (b=="") | (b=="c \\" \\" d"))')
 
-    def test_vals_to_cols(self):
+    @pytest.mark.parametrize('coltype', ['single', 'multi'])
+    def test_vals_to_cols(self, coltype):
         store = MockFeatureTable(None)
         store.cols = [
             MockColumn(name='a', values=[]),
-            omero.grid.StringColumn(name='b', values=[], size=8),
-            MockColumn(name='c,d', values=[], size=2)]
+            omero.grid.StringColumn(name='b', values=[], size=8)]
         store.metacols = (0, 1)
-        store.multiftcols = (2,)
+        if coltype == 'single':
+            store.cols.extend([MockColumn(name='c', values=[]),
+                               MockColumn(name='d', values=[])])
+            store.singleftcols = (2, 3)
+        else:
+            store.cols.append(MockColumn(name='c,d', values=[], size=2))
+            store.multiftcols = (2,)
 
         store._vals_to_cols(store.cols, [1, 'abc'], [2, 3])
         assert store.cols[0].values == [1]
         assert store.cols[1].values == ['abc']
-        assert store.cols[2].values == [[2, 3]]
+        if coltype == 'single':
+            assert store.cols[2].values == [2]
+            assert store.cols[3].values == [3]
+        else:
+            assert store.cols[2].values == [[2, 3]]
 
-    def test_colrow_to_vals(self):
+    @pytest.mark.parametrize('coltype', ['single', 'multi'])
+    def test_colrow_to_vals(self, coltype):
         store = MockFeatureTable(None)
         store.metacols = (0, 1)
-        store.multiftcols = (2,)
+        if coltype == 'single':
+            store.singleftcols = (2, 3)
+            metas, values = store._colrow_to_vals((1, 'abc', 2, 3))
+        else:
+            store.multiftcols = (2,)
+            metas, values = store._colrow_to_vals((1, 'abc', [2, 3]))
 
-        metas, values = store._colrow_to_vals((1, 'abc', [2, 3]))
         assert metas == (1, 'abc')
         assert values == (2, 3)
 
