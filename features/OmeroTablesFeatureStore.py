@@ -29,7 +29,7 @@ import omero
 import omero.clients
 from omero.rtypes import unwrap, wrap
 
-import itertools
+from itertools import izip
 import json
 import re
 
@@ -599,12 +599,12 @@ class FeatureTable(AbstractFeatureStore):
         if len(values) != ft_len:
             raise TableUsageException('Expected %d feature values' % ft_len)
 
-        for n in self.metacols:
-            cols[n].values.append(meta[n])
+        for n, m in izip(self.metacols, xrange(meta_len)):
+            cols[n].values.append(meta[m])
 
         if self.singleftcols:
-            for n in self.singleftcols:
-                cols[n].values.append(meta[n])
+            for n, v in izip(self.singleftcols, xrange(ft_len)):
+                cols[n].values.append(values[v])
         else:
             p = 0
             for n in self.multiftcols:
@@ -771,7 +771,7 @@ class FeatureTable(AbstractFeatureStore):
             if values is None:
                 values = [c.values for c in data.columns]
             else:
-                for c, v in itertools.izip(data.columns, values):
+                for c, v in izip(data.columns, values):
                     v.extend(c.values)
 
         return values
