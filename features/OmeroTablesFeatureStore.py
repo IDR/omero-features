@@ -245,25 +245,121 @@ class PermissionsHandler(object):
                 d.getPermissions().canEdit())
 
 
+def list_tables(session, name=None, ft_space=None, ann_space=None,
+                ownerid=None, parent=None):
+    """
+    Convenience method to list tables by searching the name, ft_space,
+    owner, or parent object annotation
+
+    :param name: The feature table name
+    :param ft_space: The feature table namespace
+    :param ann_space: The feature annotation namespace
+    :param ownerid: User ID of the table owner
+    :param parent: The parent OMERO object in the form 'Type:Id'
+
+    :return: List of tuples: [(FileId, FileName, FilePath, Namespace), ...]
+    """
+    tablefiles = []
+
+    if ann_space or parent:
+        params = omero.sys.ParametersI()
+        if parent:
+            otype, oid = parent.split(':')
+            params.addId(oid)
+
+            q = ('SELECT child.file.id, child.file.name, child.file.path, '
+                 'child.ns '
+                 'FROM %sAnnotationLink '
+                 'WHERE child.class=FileAnnotation '
+                 'AND parent.id=:id' % otype)
+            qfile = 'child.file'
+            if ann_space:
+                q += ' AND child.ns=:ns'
+                params.addString('ns', ann_space)
+        else:
+            q = ('SELECT file.id, file.name, file.path, ns '
+                 'FROM FileAnnotation WHERE ns=:ns')
+            qfile = 'file'
+            params.addString('ns', ann_space)
+        if name:
+            q += ' AND %s.name=:name' % qfile
+            params.addString('name', name)
+        if ft_space:
+            q += ' AND %s.path=:ft_space' % qfile
+            params.addString('ft_space', ft_space)
+        if ownerid > -1:
+            q += ' AND %s.details.owner.id=:ownerid' % qfile
+            params.addLong('ownerid', ownerid)
+
+        tablefiles = session.getQueryService().projection(q, params)
+        tablefiles = [tuple(unwrap(t)) for t in tablefiles]
+    else:
+        ft = FeatureTable(session, None, None, None)
+        q = {}
+        if name:
+            q['name'] = name
+        if ft_space:
+            q['path'] = ft_space
+        if ownerid > -1:
+            q['details.owner.id'] = ownerid
+        if q:
+            tablefiles = ft.get_objects('OriginalFile', q)
+            tablefiles = [
+                tuple(unwrap([t.getId(), t.getName(), t.getPath(), None]))
+                for t in tablefiles
+            ]
+    return tablefiles
+
+
+def open_table(session, ofileid, ann_space=None):
+    """
+    Open a table
+
+    :param ofileid: The OriginalFile ID of the table
+    :param ann_space: The feature annotation namespace
+    """
+    ft = FeatureTable(session, None, None, ann_space)
+    ft.open_table(ofileid)
+    return ft
+
+
+def new_table(session, name, ft_space, ann_space, metadesc, coldesc,
+              parent=None):
+    """
+    Create a new table, optionally attach it to an existing object
+
+    :param name: The name of the table
+    :param ft_space: The feature table namespace
+    :param ann_space: The feature annotation namespace
+    :param metadesc, coldesc: Create a new table with this list of
+           metadata and feature names, see :meth:`FeatureTable::new_table`
+    :param parent: The parent OMERO object that this table should be
+           attached to in the form 'Type:Id'
+    """
+    ft = FeatureTable(session, name, ft_space, ann_space)
+    ft.new_table(metadesc, coldesc)
+    if parent:
+        otype, oid = parent.split(':')
+    ft.create_file_annotation(
+        otype, oid, ann_space, ft.getTable().getOriginalFile())
+    return ft
+
+
 class FeatureTable(AbstractFeatureStore):
     """
     A feature store.
     Each row is an Image-ID, Roi-ID and a single fixed-width DoubleArray
     """
 
-    def __init__(self, session, name, ft_space, ann_space, ownerid,
-                 metadesc=None, coldesc=None, ofileid=None, noopen=False):
+    def __init__(self, session, name, ft_space, ann_space):
         """
         :param session: An OMERO session
         :param name: The feature table name
         :param ft_space: The feature table namespace
         :param ann_space: The feature annotation namespace
-        :param ownerid: User ID of the table owner
         :param metadesc: See :meth:`open_or_create_table`
         :param coldesc: See :meth:`open_or_create_table`
         :param ofileid: See :meth:`open_or_create_table`
-        :param noopen: Don't automatically open a table (manually call
-            :meth:new_table or :meth:open_table)
         """
         self.session = session
         self.perms = PermissionsHandler(session)
@@ -281,9 +377,6 @@ class FeatureTable(AbstractFeatureStore):
         self.ftnames = None
         self.chunk_size = None
         self.editable = None
-        if not noopen:
-            self.open_or_create_table(
-                ownerid, metadesc=metadesc, coldesc=coldesc, ofileid=ofileid)
 
     def _owns_table(func):
         def assert_owns_table(*args, **kwargs):
@@ -318,58 +411,6 @@ class FeatureTable(AbstractFeatureStore):
         """
         if not self.table:
             raise TableUsageException('Table not open')
-        return self.table
-
-    def open_or_create_table(
-            self, ownerid, metadesc=None, coldesc=None, ofileid=None):
-        """
-        Get the table using the parameters specified during initialisation
-
-        :param ownerid: The user-ID of the owner of the table file
-        :param metadesc, coldesc: If provided a new table will be created
-               and initialised with this list of metadata and feature names,
-               default None (table must already exist), see :meth:`new_table`
-        :param ofileid: If provided use the table with this OriginalFile ID,
-               the table must already be initialised, name and ft_space will
-               be ignored
-        """
-        tablepath = self.ft_space + '/' + self.name
-        if self.table:
-            raise TableUsageException(
-                'Table already open: %s' % tablepath)
-            assert self.cols
-            return self.table
-
-        if ofileid:
-            q = {'id': ofileid}
-        else:
-            q = {'name': self.name, 'path': self.ft_space}
-        if ownerid > -1:
-            q['details.owner.id'] = ownerid
-        tablefile = self.get_objects('OriginalFile', q)
-
-        if ofileid:
-            if not tablefile:
-                raise NoTableMatchException(
-                    'Table OriginalFile not found: %s' % ofileid)
-            assert len(tablefile) == 1
-
-        if metadesc or coldesc:
-            if tablefile:
-                raise TooManyTablesException(
-                    'Table file already exists: %s' % tablepath)
-            if self.perms.get_userid() != ownerid:
-                raise TableUsageException(
-                    'Unable to create table for a different user')
-            self.new_table(metadesc, coldesc)
-        else:
-            if len(tablefile) < 1:
-                raise NoTableMatchException(
-                    'No files found for: %s' % tablepath)
-            if len(tablefile) > 1:
-                raise TooManyTablesException(
-                    'Multiple files found for: %s' % tablepath)
-            self.open_table(tablefile[0])
         return self.table
 
     def _column_from_desc(self, desc):
@@ -450,6 +491,9 @@ class FeatureTable(AbstractFeatureStore):
             parameter.
         :param coldesc: A list of feature column names
         """
+        if self.table:
+            raise TableUsageException('Table already open')
+
         if not metadesc or not coldesc:
             raise TableUsageException('Metadata and feature names required')
 
@@ -521,16 +565,19 @@ class FeatureTable(AbstractFeatureStore):
             raise
         self._get_cols()
 
-    def open_table(self, tablefile):
+    def open_table(self, tableid):
         """
         Open an existing table
 
-        :param tablefile: An OriginalFile
+        :param tableid: The OriginalFile ID
         """
-        tid = unwrap(tablefile.getId())
-        self.table = self.session.sharedResources().openTable(tablefile)
+        if self.table:
+            raise TableUsageException('Table already open')
+
+        self.table = self.session.sharedResources().openTable(
+            omero.model.OriginalFileI(tableid, False))
         if not self.table:
-            raise OmeroTableException('Failed to open table ID:%d' % tid)
+            raise OmeroTableException('Failed to open table ID:%d' % tableid)
         self._get_cols()
 
     def _get_column(self, name):
