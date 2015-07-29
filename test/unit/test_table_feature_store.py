@@ -1181,16 +1181,17 @@ class TestFeatureTableManager(object):
         ownerid = 123
         session = MockSession(None, None, ownerid)
         fs = MockFeatureTable(None)
-        self.mox.StubOutWithMock(OmeroTablesFeatureStore, 'FeatureTable')
+        self.mox.StubOutWithMock(OmeroTablesFeatureStore, 'list_tables')
+        self.mox.StubOutWithMock(OmeroTablesFeatureStore, 'new_table')
         fsname = 'fsname'
         meta = [('Float', 'f')]
         colnames = ['x1', 'x2']
 
-        OmeroTablesFeatureStore.FeatureTable(
-            session, fsname, 'x/features', 'x/source', ownerid).AndReturn(None)
+        OmeroTablesFeatureStore.list_tables(
+            session, fsname, 'x/features', ownerid=ownerid).AndReturn([])
 
-        OmeroTablesFeatureStore.FeatureTable(
-            session, fsname, 'x/features', 'x/source', ownerid, meta, colnames
+        OmeroTablesFeatureStore.new_table(
+            session, fsname, 'x/features', 'x/source', meta, colnames
             ).AndReturn(fs)
 
         self.mox.ReplayAll()
@@ -1210,7 +1211,8 @@ class TestFeatureTableManager(object):
         session = MockSession(None, None, ownerid)
         fs = MockFeatureTable(session)
         fs.table = object()
-        self.mox.StubOutWithMock(OmeroTablesFeatureStore, 'FeatureTable')
+        self.mox.StubOutWithMock(OmeroTablesFeatureStore, 'list_tables')
+        self.mox.StubOutWithMock(OmeroTablesFeatureStore, 'open_table')
         fsname = 'fsname'
         fts = OmeroTablesFeatureStore.FeatureTableManager(
             session, namespace='x')
@@ -1228,9 +1230,12 @@ class TestFeatureTableManager(object):
             if state == 'closed':
                 fsold = MockFeatureTable(None)
                 fts.fss.get(k).AndReturn(fsold)
-            OmeroTablesFeatureStore.FeatureTable(
-                session, fsname, 'x/features', 'x/source', ownerid
-                ).AndReturn(fs)
+
+            r = (1234, None, None, None)
+            OmeroTablesFeatureStore.list_tables(
+                session, fsname, 'x/features', ownerid=ownerid).AndReturn([r])
+            OmeroTablesFeatureStore.open_table(
+                session, r[0], 'x/source').AndReturn(fs)
             fts.fss.insert(k, fs)
 
         self.mox.ReplayAll()
