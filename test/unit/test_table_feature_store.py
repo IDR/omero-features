@@ -1142,13 +1142,15 @@ class TestOmeroTablesFeatureStore(object):
                     params, o))).AndReturn([mf])
 
         self.mox.ReplayAll()
-        result = OmeroTablesFeatureStore.list_tables(
-            session, name, ft_space, None, ownerid, None)
         if name or ft_space or ownerid > -1:
+            result = OmeroTablesFeatureStore.list_tables(
+                session, name, ft_space, None, ownerid, None)
             assert len(result) == 1
             assert result[0] == (1L, name, ft_space, None)
         else:
-            assert result == []
+            with pytest.raises(OmeroTablesFeatureStore.OmeroTableException):
+                result = OmeroTablesFeatureStore.list_tables(
+                    session, name, ft_space, None, ownerid, None)
 
         self.mox.VerifyAll()
 

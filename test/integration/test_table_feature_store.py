@@ -24,6 +24,7 @@ import pytest
 from integration_test_lib import UserAccount
 
 import itertools
+import sys
 
 import omero
 from omero.rtypes import rstring, unwrap, wrap
@@ -149,32 +150,6 @@ class TestFeatureTable(TableStoreTestHelper):
             [2], 'multi', False)
         store.new_table(meta, ftnames)
         assert store.get_table()
-        store.close()
-
-    @pytest.mark.parametrize('exists', [True, False])
-    @pytest.mark.parametrize('ofile', [True, False])
-    def test_open_or_create_table(self, exists, ofile):
-        store = FeatureTable(
-            self.sess, self.name, self.ft_space, self.ann_space)
-        uid = unwrap(self.user.getId())
-
-        if exists:
-            tid, tcols, meta, ftnames = TableStoreHelper.create_table(
-                self.sess, self.ft_space, self.name, [1], 'multi', False)
-            if ofile:
-                table = store.open_or_create_table(uid, ofileid=tid)
-            else:
-                table = store.open_or_create_table(uid)
-
-            assert table and table == store.table
-            TableStoreHelper.assert_coltypes_equal(store.cols, tcols)
-        else:
-            with pytest.raises(OmeroTablesFeatureStore.NoTableMatchException):
-                if ofile:
-                    store.open_or_create_table(uid, ofileid=-1L)
-                else:
-                    store.open_or_create_table(uid)
-
         store.close()
 
     def test_new_table(self):
@@ -717,6 +692,170 @@ class TestFeatureTable(TableStoreTestHelper):
             with pytest.raises(
                     OmeroTablesFeatureStore.FeaturePermissionException):
                 store.delete()
+
+        store.close()
+
+
+class TestOmeroTablesFeatureStore(TableStoreTestHelper):
+
+    # Need a new account for each test, so disable setup_class and call it
+    # for each method instead
+
+    def setup_class(self):
+        pass
+
+    def teardown_class(self):
+        pass
+
+    def setup_method(self, method):
+        super(TestOmeroTablesFeatureStore, self).setup_class()
+        super(TestOmeroTablesFeatureStore, self).setup_method(method)
+
+    def teardown_method(self, method):
+        super(TestOmeroTablesFeatureStore, self).teardown_method(method)
+        super(TestOmeroTablesFeatureStore, self).teardown_class()
+
+    INVALID_UID = long(sys.maxint)
+
+    @staticmethod
+    def get_table_id(ft):
+        return unwrap(ft.get_table().getOriginalFile().getId())
+
+    # list_tables(session, name, ft_space, ann_space, ownerid, parent)
+
+    def setup_tables_for_list(self):
+        tcols, meta, ftnames = TableStoreHelper.get_columns(
+            [2], 'multi', False)
+
+        iid = unwrap(TableStoreHelper.create_image(self.sess).getId())
+        store1 = OmeroTablesFeatureStore.new_table(
+            self.sess, 'name-1', 'ft_space-12', 'ann_space-1', meta, ftnames,
+            'Image:%s' % iid)
+        store2 = OmeroTablesFeatureStore.new_table(
+            self.sess, 'name-2', 'ft_space-12', 'ann_space-2', meta, ftnames)
+
+        r1 = (self.get_table_id(store1),
+              'name-1', 'ft_space-12', 'ann_space-1')
+        r2 = (self.get_table_id(store2),
+              'name-2', 'ft_space-12', 'ann_space-2')
+
+        store1.close()
+        store2.close()
+
+        return r1, r2, iid
+
+    @pytest.mark.parametrize('name', [None, 'name-2'])
+    @pytest.mark.parametrize('ann_space', [None, 'ann_space-1'])
+    @pytest.mark.parametrize('parent', [None, True, False])
+    def test_list_tables_ann(self, name, ann_space, parent):
+        r1, r2, iid = self.setup_tables_for_list()
+        r1noann = tuple(r1[:-1] + (None,))
+        r2noann = tuple(r2[:-1] + (None,))
+
+        if parent is None:
+            parentim = None
+        elif parent:
+            parentim = 'Image:%s' % iid
+        else:
+            # Non-existent
+            parentim = 'Image:%s' % (iid + 1)
+
+        expected1 = (
+            (not name or name == 'name-1') and
+            (not ann_space or ann_space == 'ann_space-1') and
+            (parent is None or parent))
+        expected2 = (
+            (not name or name == 'name-2') and
+            (not ann_space) and
+            (parent is None))
+
+        if name is None and ann_space is None and parent is None:
+            with pytest.raises(OmeroTablesFeatureStore.OmeroTableException):
+                tables = OmeroTablesFeatureStore.list_tables(
+                    self.sess, name=name, ann_space=ann_space, parent=parentim)
+        else:
+            tables = OmeroTablesFeatureStore.list_tables(
+                self.sess, name=name, ann_space=ann_space, parent=parentim)
+            assert len(tables) in (0, 1, 2)
+            if ann_space is None and parent is None:
+                assert (r1noann in tables) == expected1
+                assert (r2noann in tables) == expected2
+            else:
+                assert (r1 in tables) == expected1
+                assert (r2 in tables) == expected2
+
+    @pytest.mark.parametrize('name', [None, 'name-1'])
+    @pytest.mark.parametrize('ft_space', [None, 'ft_space-12'])
+    @pytest.mark.parametrize('owner', [-1, INVALID_UID, 'uid'])
+    def test_list_tables_noann(self, name, ft_space, owner):
+        uid = unwrap(self.user.getId())
+        r1, r2, iid = self.setup_tables_for_list()
+        # Ignore ann_space
+        r1noann = tuple(r1[:-1] + (None,))
+        r2noann = tuple(r2[:-1] + (None,))
+
+        if owner == 'uid':
+            ownerid = uid
+        else:
+            ownerid = owner
+
+        expected1 = (
+            (not name or name == 'name-1') and
+            (not ft_space or ft_space == 'ft_space-12') and
+            (ownerid is None or ownerid == -1 or ownerid == uid))
+        expected2 = (
+            (not name or name == 'name-2') and
+            (not ft_space or ft_space == 'ft_space-12') and
+            (ownerid is None or ownerid == -1 or ownerid == uid))
+
+        if name is None and ft_space is None and (owner in (None, -1)):
+            with pytest.raises(OmeroTablesFeatureStore.OmeroTableException):
+                tables = OmeroTablesFeatureStore.list_tables(
+                    self.sess, name=name, ft_space=ft_space, ownerid=ownerid)
+        else:
+            tables = OmeroTablesFeatureStore.list_tables(
+                self.sess, name=name, ft_space=ft_space, ownerid=ownerid)
+            assert len(tables) in (0, 1, 2)
+            assert (r1noann in tables) == expected1
+            assert (r2noann in tables) == expected2
+
+    def test_open_table(self):
+        tid, tcols, meta, ftnames = TableStoreHelper.create_table(
+            self.sess, self.ft_space, self.name, [1], 'multi', False)
+        store = OmeroTablesFeatureStore.open_table(
+            self.sess, tid, self.ann_space)
+        assert unwrap(store.get_table().getOriginalFile().getId()) == tid
+        assert store.ann_space == self.ann_space
+        store.close()
+
+    @pytest.mark.parametrize('parent', [True, False])
+    def test_new_table(self, parent):
+        tcols, meta, ftnames = TableStoreHelper.get_columns(
+            [2], 'multi', False)
+
+        if parent:
+            iid = unwrap(TableStoreHelper.create_image(self.sess).getId())
+            store = OmeroTablesFeatureStore.new_table(
+                self.sess, self.name, self.ft_space, self.ann_space,
+                meta, ftnames, 'Image:%d' % iid)
+        else:
+            store = OmeroTablesFeatureStore.new_table(
+                self.sess, self.name, self.ft_space, self.ann_space,
+                meta, ftnames)
+
+        assert store.table
+        TableStoreHelper.assert_coltypes_equal(store.cols, tcols)
+
+        if parent:
+            tid = unwrap(store.get_table().getOriginalFile().getId())
+            q = ('SELECT link.child FROM ImageAnnotationLink link '
+                 'WHERE link.parent.id=:id')
+            p = omero.sys.ParametersI()
+            p.addId(iid)
+            r = self.sess.getQueryService().findAllByQuery(q, p)
+            assert len(r) == 1
+            assert isinstance(r[0], omero.model.FileAnnotation)
+            assert unwrap(r[0].getFile().getId()) == tid
 
         store.close()
 

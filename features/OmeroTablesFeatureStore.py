@@ -259,8 +259,6 @@ def list_tables(session, name=None, ft_space=None, ann_space=None,
 
     :return: List of tuples: [(FileId, FileName, FilePath, Namespace), ...]
     """
-    tablefiles = []
-
     if ann_space or parent:
         params = omero.sys.ParametersI()
         if parent:
@@ -287,7 +285,7 @@ def list_tables(session, name=None, ft_space=None, ann_space=None,
         if ft_space:
             q += ' AND %s.path=:ft_space' % qfile
             params.addString('ft_space', ft_space)
-        if ownerid > -1:
+        if ownerid is not None and ownerid > -1:
             q += ' AND %s.details.owner.id=:ownerid' % qfile
             params.addLong('ownerid', ownerid)
 
@@ -300,14 +298,17 @@ def list_tables(session, name=None, ft_space=None, ann_space=None,
             q['name'] = name
         if ft_space:
             q['path'] = ft_space
-        if ownerid > -1:
-            q['details.owner.id'] = ownerid
-        if q:
-            tablefiles = ft.get_objects('OriginalFile', q)
-            tablefiles = [
-                tuple(unwrap([t.getId(), t.getName(), t.getPath(), None]))
-                for t in tablefiles
-            ]
+        if ownerid is not None and ownerid > -1:
+            q['details.owner.id'] = long(ownerid)
+
+        if not q:
+            raise OmeroTableException('No parameters given to list_tables')
+
+        tablefiles = ft.get_objects('OriginalFile', q)
+        tablefiles = [
+            tuple(unwrap([t.getId(), t.getName(), t.getPath(), None]))
+            for t in tablefiles
+        ]
     return tablefiles
 
 
@@ -340,8 +341,9 @@ def new_table(session, name, ft_space, ann_space, metadesc, coldesc,
     ft.new_table(metadesc, coldesc)
     if parent:
         otype, oid = parent.split(':')
-    ft.create_file_annotation(
-        otype, oid, ann_space, ft.getTable().getOriginalFile())
+        oid = long(oid)
+        ft.create_file_annotation(
+            otype, oid, ann_space, ft.get_table().getOriginalFile())
     return ft
 
 
@@ -1005,9 +1007,8 @@ class FeatureTableManager(AbstractFeatureStoreManager):
             pass
 
         coldesc = names
-        fs = FeatureTable(
-            self.session, featureset_name, self.ft_space, self.ann_space,
-            ownerid, metadesc, coldesc)
+        fs = new_table(self.session, featureset_name, self.ft_space,
+                       self.ann_space, metadesc, coldesc)
         self.fss.insert((featureset_name, ownerid), fs)
         return fs
 
@@ -1018,10 +1019,18 @@ class FeatureTableManager(AbstractFeatureStoreManager):
         fs = self.fss.get(k)
         # If fs.table is None it has probably been closed
         if not fs or not fs.table:
-            fs = FeatureTable(
-                self.session, featureset_name, self.ft_space, self.ann_space,
-                ownerid)
-            # raises NoTableMatchException if not found
+            tables = list_tables(
+                self.session, featureset_name, self.ft_space, ownerid=ownerid)
+            if len(tables) < 1:
+                raise NoTableMatchException(
+                    'No matching table found for featureset:%s owner:%s' % (
+                        featureset_name, ownerid))
+            if len(tables) > 1:
+                raise TooManyTablesException(
+                    'Multiple matching tables found for '
+                    'featureset:%s owner:%s' % (
+                        featureset_name, ownerid))
+            fs = open_table(self.session, tables[0][0], self.ann_space)
             self.fss.insert(k, fs)
         return fs
 
