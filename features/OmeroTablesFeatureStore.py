@@ -251,6 +251,7 @@ def list_tables(session, name=None, ft_space=None, ann_space=None,
     Convenience method to list tables by searching the name, ft_space,
     owner, or parent object annotation
 
+    :param session: An OMERO session
     :param name: The feature table name
     :param ft_space: The feature table namespace
     :param ann_space: The feature annotation namespace
@@ -312,15 +313,18 @@ def list_tables(session, name=None, ft_space=None, ann_space=None,
     return tablefiles
 
 
-def open_table(session, ofileid, ann_space=None):
+def open_table(session, ofileid, ann_space=None, defaultcoltype=None):
     """
     Open a table
 
+    :param session: An OMERO session
     :param ofileid: The OriginalFile ID of the table
     :param ann_space: The feature annotation namespace
+    :param defaultcoltype: If this is not an OMERO.features table then
+           assume all columns are of this metadata type
     """
     ft = FeatureTable(session, None, None, ann_space)
-    ft.open_table(ofileid)
+    ft.open_table(ofileid, defaultcoltype)
     return ft
 
 
@@ -329,6 +333,7 @@ def new_table(session, name, ft_space, ann_space, metadesc, coldesc,
     """
     Create a new table, optionally attach it to an existing object
 
+    :param session: An OMERO session
     :param name: The name of the table
     :param ft_space: The feature table namespace
     :param ann_space: The feature annotation namespace
@@ -445,7 +450,7 @@ class FeatureTable(AbstractFeatureStore):
         except (ValueError, KeyError):
             return None
 
-    def _get_cols(self):
+    def _get_cols(self, defaultcoltype=None):
         """
         Get the table headers, splitting them into metadata and feature cols
         """
@@ -461,15 +466,18 @@ class FeatureTable(AbstractFeatureStore):
 
         for n in xrange(len(self.cols)):
             col = self.cols[n]
-            if self._get_column_type(col) == _COLUMN_METADATA:
+            coltype = self._get_column_type(col)
+            if not coltype:
+                coltype = defaultcoltype
+            if coltype == _COLUMN_METADATA:
                 self.metacols.append(n)
-            elif self._get_column_type(col) == _COLUMN_SINGLE_FEATURE:
+            elif coltype == _COLUMN_SINGLE_FEATURE:
                 if self.multiftcols:
                     raise TableUsageException(
                         'Mixing single and multiple feature columns '
                         'is not supported')
                 self.singleftcols.append(n)
-            elif self._get_column_type(col) == _COLUMN_MULTIPLE_FEATURE:
+            elif coltype == _COLUMN_MULTIPLE_FEATURE:
                 if self.singleftcols:
                     raise TableUsageException(
                         'Mixing single and multiple feature columns '
@@ -567,11 +575,13 @@ class FeatureTable(AbstractFeatureStore):
             raise
         self._get_cols()
 
-    def open_table(self, tableid):
+    def open_table(self, tableid, defaultcoltype=None):
         """
         Open an existing table
 
         :param tableid: The OriginalFile ID
+        :param defaultcoltype: If this is not an OMERO.features table then
+               assume all columns are of this metadata type
         """
         if self.table:
             raise TableUsageException('Table already open')
@@ -580,7 +590,7 @@ class FeatureTable(AbstractFeatureStore):
             omero.model.OriginalFileI(tableid, False))
         if not self.table:
             raise OmeroTableException('Failed to open table ID:%d' % tableid)
-        self._get_cols()
+        self._get_cols(defaultcoltype)
 
     def _get_column(self, name):
         """
