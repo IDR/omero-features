@@ -29,7 +29,8 @@ import omero
 import omero.clients
 from omero.rtypes import unwrap, wrap
 
-import itertools
+from itertools import izip
+import json
 import re
 
 import logging
@@ -42,8 +43,21 @@ DEFAULT_ANNOTATION_SUBSPACE = 'source'
 
 FEATURE_NAME_RE = r'^[A-Za-z0-9][A-Za-z0-9_ \-\(\)\[\]\{\}\.]*$'
 
+# Column type strings
+COLUMN_TYPES = [m.group(1) for m in (
+    re.match('([^_]\w+)Column$', s) for s in dir(omero.grid)) if m]
+META_COLUMN_TYPES = [t for t in COLUMN_TYPES if not t.endswith('Array')]
+
 # Indicates the object ID is unknown
 NOID = -1
+
+# Internal feature column classes:
+# Metadata column
+_COLUMN_METADATA = 'metadata'
+# Column is an ArrayColumn containing multiple features (should be split)
+_COLUMN_MULTIPLE_FEATURE = 'multifeature'
+# Column contains a single feature (which may be an ArrayColumn)
+_COLUMN_SINGLE_FEATURE = 'feature'
 
 
 class TableStoreException(Exception):
@@ -231,29 +245,153 @@ class PermissionsHandler(object):
                 d.getPermissions().canEdit())
 
 
+def list_tables(session, name=None, ft_space=None, ann_space=None,
+                ownerid=None, parent=None):
+    """
+    Convenience method to list tables by searching the name, ft_space,
+    owner, or parent object annotation
+
+    :param session: An OMERO session
+    :param name: The feature table name
+    :param ft_space: The feature table namespace
+    :param ann_space: The feature annotation namespace
+    :param ownerid: User ID of the table owner
+    :param parent: The parent OMERO object in the form 'Type:Id'
+
+    :return: List of tuples: [(FileId, FileName, FilePath, Namespace), ...]
+    """
+    if ann_space or parent:
+        params = omero.sys.ParametersI()
+        if parent:
+            otype, oid = parent.split(':')
+            params.addId(oid)
+
+            q = ('SELECT child.file.id, child.file.name, child.file.path, '
+                 'child.ns '
+                 'FROM %sAnnotationLink '
+                 'WHERE child.class=FileAnnotation '
+                 'AND parent.id=:id' % otype)
+            qfile = 'child.file'
+            if ann_space:
+                q += ' AND child.ns=:ns'
+                params.addString('ns', ann_space)
+        else:
+            q = ('SELECT file.id, file.name, file.path, ns '
+                 'FROM FileAnnotation WHERE ns=:ns')
+            qfile = 'file'
+            params.addString('ns', ann_space)
+        if name:
+            q += ' AND %s.name=:name' % qfile
+            params.addString('name', name)
+        if ft_space:
+            q += ' AND %s.path=:ft_space' % qfile
+            params.addString('ft_space', ft_space)
+        if ownerid is not None and ownerid > -1:
+            q += ' AND %s.details.owner.id=:ownerid' % qfile
+            params.addLong('ownerid', ownerid)
+
+        tablefiles = session.getQueryService().projection(q, params)
+        tablefiles = [tuple(unwrap(t)) for t in tablefiles]
+    else:
+        ft = FeatureTable(session, None, None, None)
+        q = {}
+        if name:
+            q['name'] = name
+        if ft_space:
+            q['path'] = ft_space
+        if ownerid is not None and ownerid > -1:
+            q['details.owner.id'] = long(ownerid)
+
+        if not q:
+            raise OmeroTableException('No parameters given to list_tables')
+
+        tablefiles = ft.get_objects('OriginalFile', q)
+        tablefiles = [
+            tuple(unwrap([t.getId(), t.getName(), t.getPath(), None]))
+            for t in tablefiles
+        ]
+    return tablefiles
+
+
+def open_table(session, ofileid, ann_space=None, defaultcoltype=None):
+    """
+    Open a table
+
+    :param session: An OMERO session
+    :param ofileid: The OriginalFile ID of the table
+    :param ann_space: The feature annotation namespace
+    :param defaultcoltype: If this is not an OMERO.features table then
+           assume all columns are of this metadata type
+    """
+    ft = FeatureTable(session, None, None, ann_space)
+    ft.open_table(ofileid, defaultcoltype)
+    return ft
+
+
+def new_table(session, name, ft_space, ann_space, metadesc, coldesc,
+              parent=None):
+    """
+    Create a new table, optionally attach it to an existing object
+
+    :param session: An OMERO session
+    :param name: The name of the table
+    :param ft_space: The feature table namespace
+    :param ann_space: The feature annotation namespace
+    :param metadesc, coldesc: Create a new table with this list of
+           metadata and feature names, see :meth:`FeatureTable::new_table`
+    :param parent: The parent OMERO object that this table should be
+           attached to in the form 'Type:Id'
+    """
+    ft = FeatureTable(session, name, ft_space, ann_space)
+    ft.new_table(metadesc, coldesc)
+    if parent:
+        otype, oid = parent.split(':')
+        oid = long(oid)
+        ft.create_file_annotation(
+            otype, oid, ann_space, ft.get_table().getOriginalFile())
+    return ft
+
+
 class FeatureTable(AbstractFeatureStore):
     """
     A feature store.
     Each row is an Image-ID, Roi-ID and a single fixed-width DoubleArray
     """
 
-    def __init__(self, session, name, ft_space, ann_space, ownerid,
-                 coldesc=None):
+    def __init__(self, session, name, ft_space, ann_space):
+        """
+        :param session: An OMERO session
+        :param name: The feature table name
+        :param ft_space: The feature table namespace
+        :param ann_space: The feature annotation namespace
+        :param metadesc: See :meth:`open_or_create_table`
+        :param coldesc: See :meth:`open_or_create_table`
+        :param ofileid: See :meth:`open_or_create_table`
+        """
         self.session = session
         self.perms = PermissionsHandler(session)
         self.name = name
         self.ft_space = ft_space
         self.ann_space = ann_space
         self.cols = None
+        self.colnamemap = None
+        self.metacols = None
+        self.singleftcols = None
+        self.multiftcols = None
+        self.pendingcols = None
         self.table = None
+        self.metanames = None
         self.ftnames = None
         self.chunk_size = None
-        self.get_table(ownerid, coldesc=coldesc)
+        self.editable = None
 
     def _owns_table(func):
         def assert_owns_table(*args, **kwargs):
             self = args[0]
-            if not self.perms.can_edit(self.table.getOriginalFile()):
+            if self.editable is None:
+                self.editable = self.perms.can_edit(
+                    self.table.getOriginalFile())
+            if not self.editable:
                 raise FeaturePermissionException(
                     'Feature table must be owned by the current user')
             return func(*args, **kwargs)
@@ -267,54 +405,119 @@ class FeatureTable(AbstractFeatureStore):
             self.table.close()
             self.table = None
             self.cols = None
+            self.colnamemap = None
+            self.metacols = None
+            self.singleftcols = None
+            self.multiftcols = None
             self.ftnames = None
+            self.editable = None
 
-    def get_table(self, ownerid, coldesc=None):
+    def get_table(self):
         """
-        Get the table using the parameters specified during initialisation
-
-        :param ownerid: The user-ID of the owner of the table file
-        :param coldesc: If provided a new table will be created and
-               initialised with this list of feature names, default None
-               (table must already exist)
+        Get the table handle
         """
-        tablepath = self.ft_space + '/' + self.name
-        if self.table:
-            if coldesc:
-                raise TableUsageException(
-                    'New table requested but already open: %s' % tablepath)
-            assert self.cols
-            return self.table
-
-        q = {'name': self.name, 'path': self.ft_space}
-        if ownerid > -1:
-            q['details.owner.id'] = ownerid
-        tablefile = self.get_objects('OriginalFile', q)
-
-        if coldesc:
-            if tablefile:
-                raise TooManyTablesException(
-                    'Table file already exists: %s' % tablepath)
-            if self.perms.get_userid() != ownerid:
-                raise TableUsageException(
-                    'Unable to create table for a different user')
-            self.new_table(coldesc)
-        else:
-            if len(tablefile) < 1:
-                raise NoTableMatchException(
-                    'No files found for: %s' % tablepath)
-            if len(tablefile) > 1:
-                raise TooManyTablesException(
-                    'Multiple files found for: %s' % tablepath)
-            self.open_table(tablefile[0])
+        if not self.table:
+            raise TableUsageException('Table not open')
         return self.table
 
-    def new_table(self, coldesc):
+    def _column_from_desc(self, desc):
+        """
+        Create an omero.grid.*Column from a metadata description
+        """
+        coltype = getattr(omero.grid, desc[0] + 'Column')
+        d = self._get_column_json(_COLUMN_METADATA)
+        if len(desc) > 2:
+            col = coltype(desc[1], d, desc[2])
+        else:
+            col = coltype(desc[1], d)
+        return col
+
+    def _get_column_json(self, columntype):
+        """
+        Creates a json block for a column's description field
+        """
+        assert columntype in (
+            _COLUMN_METADATA, _COLUMN_MULTIPLE_FEATURE, _COLUMN_SINGLE_FEATURE)
+        return json.dumps({'columntype': columntype})
+
+    def _get_column_type(self, col):
+        """
+        Parses the column's json description and returns the column type, or
+        None if it couldn't be parsed
+        """
+        try:
+            return json.loads(col.description)['columntype']
+        except (ValueError, KeyError):
+            return None
+
+    def _get_cols(self, defaultcoltype=None):
+        """
+        Get the table headers, splitting them into metadata and feature cols
+        """
+        self.cols = tuple(self.table.getHeaders())
+        if not self.cols:
+            tid = unwrap(self.table.getOriginalFile().getId())
+            raise OmeroTableException(
+                'Failed to get columns for table ID:%d' % tid)
+
+        self.metacols = []
+        self.singleftcols = []
+        self.multiftcols = []
+
+        for n in xrange(len(self.cols)):
+            col = self.cols[n]
+            coltype = self._get_column_type(col)
+            if not coltype:
+                coltype = defaultcoltype
+            if coltype == _COLUMN_METADATA:
+                self.metacols.append(n)
+            elif coltype == _COLUMN_SINGLE_FEATURE:
+                if self.multiftcols:
+                    raise TableUsageException(
+                        'Mixing single and multiple feature columns '
+                        'is not supported')
+                self.singleftcols.append(n)
+            elif coltype == _COLUMN_MULTIPLE_FEATURE:
+                if self.singleftcols:
+                    raise TableUsageException(
+                        'Mixing single and multiple feature columns '
+                        'is not supported')
+                self.multiftcols.append(n)
+            else:
+                raise OmeroTableException(
+                    'Unknown metadata/feature column type')
+
+        self.metacols = tuple(self.metacols)
+        self.singleftcols = tuple(self.singleftcols)
+        self.multiftcols = tuple(self.multiftcols)
+
+    def new_table(self, metadesc, coldesc):
         """
         Create a new table
 
-        :param coldesc: A list of column names
+        :param metadesc: A list of (column type, column name[, width])
+            tuples. Columns must be scalars or strings, see META_COLUMN_TYPES
+            for valid type strings. String columns require an additional width
+            parameter.
+        :param coldesc: A list of feature column names
         """
+        if self.table:
+            raise TableUsageException('Table already open')
+
+        if not metadesc or not coldesc:
+            raise TableUsageException('Metadata and feature names required')
+
+        for m in metadesc:
+            if len(m) not in (2, 3):
+                raise TableUsageException('Invalid metadata: %s' % str(m))
+            if not m[0] in META_COLUMN_TYPES:
+                raise TableUsageException('Invalid metadata type: %s' % str(m))
+            if m[0] == 'String':
+                if len(m) != 3 or not m[2] or m[2] < 1:
+                    raise TableUsageException(
+                        'Invalid metadata width: %s' % str(m))
+            if not re.match(FEATURE_NAME_RE, m[1]):
+                raise TableUsageException('Invalid metadata name: %s' % str(m))
         for n in coldesc:
             if not re.match(FEATURE_NAME_RE, n):
                 raise TableUsageException('Invalid feature name: %s' % n)
@@ -343,10 +546,7 @@ class FeatureTable(AbstractFeatureStore):
             if not self.table:
                 raise OmeroTableException('Failed to reopen table ID:%d' % tid)
 
-        coldef = [
-            omero.grid.ImageColumn('ImageID', ''),
-            omero.grid.RoiColumn('RoiID', '')
-        ]
+        coldef = [self._column_from_desc(m) for m in metadesc]
 
         # We don't currently have a good way of storing individual feature
         # names for a DoubleArrayColumn:
@@ -362,8 +562,10 @@ class FeatureTable(AbstractFeatureStore):
         if len(names) > 64000:
             log.warn(
                 'Feature names may exceed the limit of the current Tables API')
+
+        d = self._get_column_json(_COLUMN_MULTIPLE_FEATURE)
         coldef.append(omero.grid.DoubleArrayColumn(
-            names, '', len(coldesc)))
+            names, d, len(coldesc)))
 
         try:
             self.table.initialize(coldef)
@@ -371,99 +573,135 @@ class FeatureTable(AbstractFeatureStore):
             log.error('Failed to initialize table, deleting: %d', tid)
             self.session.getUpdateService().deleteObject(tof)
             raise
-        self.cols = self.table.getHeaders()
-        if not self.cols:
-            raise OmeroTableException(
-                'Failed to get columns for table ID:%d' % tid)
+        self._get_cols()
 
-    def open_table(self, tablefile):
+    def open_table(self, tableid, defaultcoltype=None):
         """
         Open an existing table
 
-        :param tablefile: An OriginalFile
+        :param tableid: The OriginalFile ID
+        :param defaultcoltype: If this is not an OMERO.features table then
+               assume all columns are of this metadata type
         """
-        tid = unwrap(tablefile.getId())
-        self.table = self.session.sharedResources().openTable(tablefile)
+        if self.table:
+            raise TableUsageException('Table already open')
+
+        self.table = self.session.sharedResources().openTable(
+            omero.model.OriginalFileI(tableid, False))
         if not self.table:
-            raise OmeroTableException('Failed to open table ID:%d' % tid)
-        self.cols = self.table.getHeaders()
-        if not self.cols:
-            raise OmeroTableException(
-                'Failed to get columns for table ID:%d' % tid)
+            raise OmeroTableException('Failed to open table ID:%d' % tableid)
+        self._get_cols(defaultcoltype)
+
+    def _get_column(self, name):
+        """
+        Get a table column header by name
+        """
+        if not self.colnamemap:
+            self.colnamemap = dict((c.name, c) for c in self.cols)
+        try:
+            return self.colnamemap[name]
+        except KeyError as e:
+            raise OmeroTableException('Unknown column name: %s' % e)
+
+    def metadata_names(self):
+        """
+        Get the list of metadata names
+        """
+        if not self.metanames:
+            self.metanames = tuple(self.cols[n].name for n in self.metacols)
+        return self.metanames
 
     def feature_names(self):
         """
         Get the list of feature names
         """
         if not self.ftnames:
-            self.ftnames = self.cols[2].name.split(',')
-            assert len(self.ftnames) == self.cols[2].size
+            if self.singleftcols:
+                self.ftnames = tuple(
+                    self.cols[n].name for n in self.singleftcols)
+            else:
+                self.ftnames = []
+                for n in self.multiftcols:
+                    names = self.cols[n].name.split(',')
+                    assert len(names) == self.cols[n].size
+                    self.ftnames.extend(names)
+                self.ftnames = tuple(self.ftnames)
         return self.ftnames
 
-    def store_by_image(self, image_id, values):
-        self.store_by_object('Image', long(image_id), values)
+    def _get_condition(self, k, v):
+        if v is None:
+            return None
+        if isinstance(v, (tuple, list)):
+            cs = []
+            for w in v:
+                c = self._get_condition(k, w)
+                if c is not None:
+                    cs.append(c)
+            if cs:
+                return '(%s)' % ' | '.join(cs)
+            return None
+        if isinstance(self._get_column(k), omero.grid.StringColumn):
+            v = '"%s"' % v.replace('"', '\\"')
+        return '(%s==%s)' % (k, v)
 
-    def store_by_roi(self, roi_id, values, image_id=None):
-        if image_id is None:
-            params = omero.sys.ParametersI()
-            params.addId(roi_id)
-            image_id = self.session.getQueryService().projection(
-                'SELECT r.image.id FROM Roi r WHERE r.id=:id', params)
-            try:
-                image_id = unwrap(image_id[0][0])
-            except IndexError:
-                raise TableUsageException('No image found for Roi: %d', roi_id)
-        if image_id < 0:
-            self.store_by_object('Roi', long(roi_id), values)
+    def _vals_to_cols(self, cols, meta, values):
+        """
+        Append a row into a set of columns, handles the mix of metadata
+        and feature column types
+        """
+        meta_len = len(self.metacols)
+        if len(meta) != meta_len:
+            raise TableUsageException('Expected %d metadata values' % meta_len)
+
+        ft_len = len(self.singleftcols) if self.singleftcols else sum(
+            cols[n].size for n in self.multiftcols)
+        if len(values) != ft_len:
+            raise TableUsageException('Expected %d feature values' % ft_len)
+
+        for n, m in izip(self.metacols, xrange(meta_len)):
+            cols[n].values.append(meta[m])
+
+        if self.singleftcols:
+            for n, v in izip(self.singleftcols, xrange(ft_len)):
+                cols[n].values.append(values[v])
         else:
-            self.store_by_object(
-                'Roi', long(roi_id), values, 'Image', image_id)
+            p = 0
+            for n in self.multiftcols:
+                q = p + cols[n].size
+                cols[n].values.append(values[p:q])
+                p = q
+
+    def _colrow_to_vals(self, rowvalues):
+        """
+        Split a column row into metadata and feature fields, handles
+        the mix of metadata and feature column types
+        """
+        metas = tuple(rowvalues[n] for n in self.metacols)
+        if self.singleftcols:
+            values = tuple(rowvalues[n] for n in self.singleftcols)
+        else:
+            values = []
+            for n in self.multiftcols:
+                values.extend(rowvalues[n])
+            values = tuple(values)
+        return metas, values
 
     @_owns_table
-    def store_by_object(self, object_type, object_id, values,
-                        parent_type=None, parent_id=None, replace=True):
-        """
-        Store a feature row
+    def store(self, meta, values, replace=True):
+        for col in self.cols:
+            col.values = []
 
-        :param object_type: The object directly associated with the features
-        :param object_id: The object ID
-        :param values: Feature values, an array of doubles
-        :param parent_type: The parent type of the object, optional
-        :param parent_id: The parent ID of the object
-        :param replace: If True (default) replace existing rows with the same
-               IDs
-        """
-        image_id = NOID
-        roi_id = NOID
-        if object_type == 'Image':
-            if parent_type:
-                raise TableUsageException('Parent not supported for Image')
-            image_id = object_id
-        elif object_type == 'Roi':
-            roi_id = object_id
-            if parent_type:
-                if parent_type == 'Image':
-                    image_id = parent_id
-                else:
-                    raise TableUsageException(
-                        'Invalid parent type: %s', parent_type)
-        else:
-            raise TableUsageException(
-                'Invalid object type: %s' % object_type)
-
-        self.cols[0].values = [image_id]
-        self.cols[1].values = [roi_id]
+        self._vals_to_cols(self.cols, meta, values)
 
         offset = -1
         if replace:
-            conditions = '(ImageID==%d) & (RoiID==%d)' % (
-                self.cols[0].values[0], self.cols[1].values[0])
+            kvs = zip(self.metadata_names(), meta)
+            conditions = ' & '.join(
+                self._get_condition(kv[0], kv[1]) for kv in kvs)
             offsets = self.table.getWhereList(
                 conditions, {}, 0, self.table.getNumberOfRows(), 0)
             if offsets:
                 offset = max(offsets)
-
-        self.cols[2].values = [values]
 
         if offset > -1:
             data = omero.grid.Data(rowNumbers=[offset], columns=self.cols)
@@ -471,56 +709,63 @@ class FeatureTable(AbstractFeatureStore):
         else:
             self.table.addData(self.cols)
 
-        if image_id > NOID:
-            self.create_file_annotation('Image', image_id, self.ann_space,
-                                        self.table.getOriginalFile())
-        if roi_id > NOID:
-            self.create_file_annotation('Roi', roi_id, self.ann_space,
-                                        self.table.getOriginalFile())
+    @_owns_table
+    def store_pending(self, meta, values):
+        """
+        Append data to a pending table, do not write to server (replace is
+        not supported)
 
-    def fetch_by_image(self, image_id, last=False):
-        values = self.fetch_by_object('Image', image_id)
-        if len(values) > 1 and not last:
-            raise TableUsageException(
-                'Multiple feature rows found for Image %d' % image_id)
-        if not values:
-            raise TableUsageException(
-                'No feature rows found for Image %d' % image_id)
-        return self.feature_row(values[-1])
+        :param meta: See :meth:`store`
+        :param values: See :meth:`store`
+        """
+        if not self.pendingcols:
+            self.pendingcols = self.table.getHeaders()
+            for col in self.pendingcols:
+                col.values = []
 
-    def fetch_by_roi(self, roi_id, last=False):
-        values = self.fetch_by_object('Roi', roi_id)
-        if len(values) > 1 and not last:
-            raise TableUsageException(
-                'Multiple feature rows found for Roi %d' % roi_id)
-        if not values:
-            raise TableUsageException(
-                'No feature rows found for Roi %d' % roi_id)
-        return self.feature_row(values[-1])
+        self._vals_to_cols(self.pendingcols, meta, values)
 
-    def fetch_all(self, image_id):
-        values = self.fetch_by_object('Image', image_id)
+    @_owns_table
+    def store_flush(self):
+        """
+        Write any pending table data
+
+        :return: The number of rows written
+        """
+        n = 0
+        if self.pendingcols:
+            self.table.addData(self.pendingcols)
+            n = len(self.pendingcols[0].values)
+        self.pendingcols = None
+        return n
+
+    def fetch_by_metadata(self, meta):
+        values = self.fetch_by_metadata_raw(meta)
         return [self.feature_row(v) for v in values]
+
+    def fetch_by_metadata_raw(self, meta):
+        try:
+            kvs = meta.iteritems()
+        except AttributeError:
+            meta_len = len(self.metadata_names())
+            if len(meta) != meta_len:
+                raise TableUsageException(
+                    'Expected %d metadata values' % meta_len)
+            kvs = zip(self.metadata_names(), meta)
+
+        conditions = []
+        for kv in kvs:
+            c = self._get_condition(kv[0], kv[1])
+            if c:
+                conditions.append(c)
+        conditions = ' & '.join(conditions)
+        values = self.filter_raw(conditions)
+        return values
 
     def filter(self, conditions):
         log.warn('The filter/query syntax is still under development')
         values = self.filter_raw(conditions)
         return [self.feature_row(v) for v in values]
-
-    def fetch_by_object(self, object_type, object_id):
-        """
-        Fetch all feature rows for an object
-
-        :param object_type: The object type
-        :param object_id: The object ID
-        :return: A list of tuples (Image-ID, Roi-ID, feature-values)
-        """
-        if object_type in ('Image', 'Roi'):
-            cond = '(%sID==%d)' % (object_type, object_id)
-        else:
-            raise TableUsageException(
-                'Unsupported object type: %s' % object_type)
-        return self.filter_raw(cond)
 
     def filter_raw(self, conditions):
         """
@@ -528,10 +773,13 @@ class FeatureTable(AbstractFeatureStore):
 
         :param conditions: The query conditions
                Note the query syntax is still to be decided
-        :return: A list of tuples (Image-ID, Roi-ID, feature-values)
+        :return: A list of tuples containing the values for each row
         """
-        offsets = self.table.getWhereList(
-            conditions, {}, 0, self.table.getNumberOfRows(), 0)
+        if conditions:
+            offsets = self.table.getWhereList(
+                conditions, {}, 0, self.table.getNumberOfRows(), 0)
+        else:
+            offsets = range(self.table.getNumberOfRows())
         values = self.chunked_table_read(offsets, self.get_chunk_size())
 
         # Convert into row-wise storage
@@ -541,16 +789,18 @@ class FeatureTable(AbstractFeatureStore):
             assert len(offsets) == len(v)
         return zip(*values)
 
-    def feature_row(self, values):
+    def feature_row(self, rowvalues):
         """
         Create a FeatureRow object
 
         :param values: The feature values
         """
+        fnames = self.feature_names()
+        mnames = self.metadata_names()
+        metas, values = self._colrow_to_vals(rowvalues)
         return FeatureRow(
-            names=self.feature_names(),
-            infonames=[h.name for h in self.cols[:2]],
-            values=values[2], infovalues=values[:2])
+            names=fnames, infonames=mnames,
+            values=values, infovalues=metas)
 
     def get_chunk_size(self):
         """
@@ -580,7 +830,7 @@ class FeatureTable(AbstractFeatureStore):
             if values is None:
                 values = [c.values for c in data.columns]
             else:
-                for c, v in itertools.izip(data.columns, values):
+                for c, v in izip(data.columns, values):
                     v.extend(c.values)
 
         return values
@@ -756,7 +1006,7 @@ class FeatureTableManager(AbstractFeatureStoreManager):
         self.cachesize = kwargs.get('cachesize', 10)
         self.fss = LRUClosableCache(kwargs.get('cachesize', 10))
 
-    def create(self, featureset_name, names):
+    def create(self, featureset_name, metadesc, names):
         try:
             ownerid = self.session.getAdminService().getEventContext().userId
             fs = self.get(featureset_name, ownerid)
@@ -767,9 +1017,8 @@ class FeatureTableManager(AbstractFeatureStoreManager):
             pass
 
         coldesc = names
-        fs = FeatureTable(
-            self.session, featureset_name, self.ft_space, self.ann_space,
-            ownerid, coldesc)
+        fs = new_table(self.session, featureset_name, self.ft_space,
+                       self.ann_space, metadesc, coldesc)
         self.fss.insert((featureset_name, ownerid), fs)
         return fs
 
@@ -780,10 +1029,18 @@ class FeatureTableManager(AbstractFeatureStoreManager):
         fs = self.fss.get(k)
         # If fs.table is None it has probably been closed
         if not fs or not fs.table:
-            fs = FeatureTable(
-                self.session, featureset_name, self.ft_space, self.ann_space,
-                ownerid)
-            # raises NoTableMatchException if not found
+            tables = list_tables(
+                self.session, featureset_name, self.ft_space, ownerid=ownerid)
+            if len(tables) < 1:
+                raise NoTableMatchException(
+                    'No matching table found for featureset:%s owner:%s' % (
+                        featureset_name, ownerid))
+            if len(tables) > 1:
+                raise TooManyTablesException(
+                    'Multiple matching tables found for '
+                    'featureset:%s owner:%s' % (
+                        featureset_name, ownerid))
+            fs = open_table(self.session, tables[0][0], self.ann_space)
             self.fss.insert(k, fs)
         return fs
 

@@ -61,7 +61,7 @@ class AbstractFeatureRow(object):
 
 class AbstractFeatureStore(object):
     """
-    A single feature store
+    A single feature store including metadata columns
 
     Each entry in a feature store consists of a FeatureRow
     """
@@ -69,59 +69,30 @@ class AbstractFeatureStore(object):
     __metaclass__ = ABCMeta
 
     @abstractmethod
-    def store_by_image(self, image_id, values):
+    def store(self, meta, values):
         """
-        Store a single FeatureRow by Image ID
+        Store a single FeatureRow
 
-        :param image_id: The Image ID
+        :param meta: The metadata values
         :param values: The feature values
         """
         pass
 
     @abstractmethod
-    def store_by_roi(self, roi_id, values):
+    def fetch_by_metadata(self, meta, raw=False):
         """
-        Store a single FeatureRow by Image ID
+        Retrieve FeatureRows by matching metadata
 
-        :param image_id: The Image ID
-        :param values: The feature values
-        """
-        pass
-
-    @abstractmethod
-    def fetch_by_image(self, image_id):
-        """
-        Retrieve a single FeatureRow by Image ID
-
-        :param image_id: The Image ID
-        :return: A FeatureRow
-        """
-        pass
-
-    @abstractmethod
-    def fetch_by_roi(self, roi_id):
-        """
-        Retrieve a single FeatureRow by ROI ID
-
-        :param roi_id: The ROI ID
-        :return: A FeatureRow
-        """
-        pass
-
-    @abstractmethod
-    def fetch_all(self, image_id):
-        """
-        Retrieve all rows of features identified by Image ID
-
-        :param image_id: The Image ID
-        :return: A list of FeatureRows
+        :param meta: Either a dict of fieldname=value, or an array of
+               metadata values to be match (use <None> to ignore a column)
+        :return: FeatureRows
         """
         pass
 
     @abstractmethod
     def filter(self, conditions):
         """
-        Retrieve the features and Image/ROI IDs which fulfill the conditions
+        Retrieve the features which fulfill the conditions
 
         :param conditions: The feature query conditions
         :return: A list of FeatureRows
